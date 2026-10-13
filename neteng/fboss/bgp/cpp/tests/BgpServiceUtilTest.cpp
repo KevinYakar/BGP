@@ -1154,4 +1154,342 @@ TEST_F(BgpServiceUtilTest, GetUnsupportedBgpPeerFieldsNonOptionalUnsetTest) {
   EXPECT_THAT(result, Not(Contains("local_addr")));
 }
 
+/*
+ * RejectedNetworksAccumulator: the aggregation behind getRejectedNetworks*.
+ *
+ * Exercised here rather than through the thrift handler because the limits
+ * are construction parameters -- the e2e handler tests cover the wiring and
+ * the caller-supplied max_groups, but only a direct test can drive the
+ * server-side caps without a RIB big enough to hit them.
+ */
+class RejectedNetworksAccumulatorTest : public ::testing::Test {
+ protected:
+  static TIpPrefix prefixOf(const std::string& cidr) {
+    return createTIpPrefix(folly::IPAddress::createNetwork(cidr));
+  }
+
+  /*
+   * One rejected path, fed the way the handler feeds an untruncated walk: the
+   * path is counted and its (prefix, policy) is listed.
+   */
+  static void reject(
+      RejectedNetworksAccumulator& accumulator,
+      const std::string& cidr,
+      const std::string& policyName) {
+    accumulator.addRejectedPaths(policyName, 1);
+    accumulator.addRejectedPrefix(prefixOf(cidr), policyName);
+  }
+};
+
+/* One policy denying two prefixes on two peers rolls up per policy. */
+TEST_F(RejectedNetworksAccumulatorTest, RollsUpPerPolicy) {
+  RejectedNetworksAccumulator accumulator;
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  reject(accumulator, "11.0.0.0/8", "Denied by CRF");
+  accumulator.setCurrentPeer("fc00::2", "fsw002.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildSummary(/*neighborsMatched=*/2);
+
+  ASSERT_EQ(1, response.by_policy()->size());
+  const auto& stats = response.by_policy()->at("Denied by CRF");
+  EXPECT_EQ(2, folly::copy(stats.prefix_count().value()));
+  EXPECT_EQ(3, folly::copy(stats.path_count().value()));
+  EXPECT_EQ(2, folly::copy(stats.neighbor_count().value()));
+  EXPECT_EQ(3, folly::copy(response.total_rejected_paths().value()));
+  EXPECT_EQ(2, folly::copy(response.neighbors_matched().value()));
+  EXPECT_FALSE(folly::copy(response.truncated().value()));
+}
+
+/*
+ * A peer's pre-aggregated path count lands in the rollup as-is. This is the
+ * shape a capped walk hands over: more paths counted than prefixes listed.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, PathCountsNeedNotMatchListedPrefixes) {
+  RejectedNetworksAccumulator accumulator;
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  accumulator.addRejectedPaths("Denied by CRF", 5);
+  accumulator.addRejectedPrefix(prefixOf("10.0.0.0/8"), "Denied by CRF");
+
+  const auto response = accumulator.buildSummary(/*neighborsMatched=*/1);
+
+  const auto& stats = response.by_policy()->at("Denied by CRF");
+  EXPECT_EQ(5, folly::copy(stats.path_count().value()));
+  EXPECT_EQ(1, folly::copy(stats.prefix_count().value()));
+  EXPECT_EQ(1, folly::copy(stats.neighbor_count().value()));
+  EXPECT_EQ(5, folly::copy(response.total_rejected_paths().value()));
+}
+
+/* Details adds one group per (prefix, policy), naming every denying peer. */
+TEST_F(RejectedNetworksAccumulatorTest, GroupsNameEveryDenyingPeer) {
+  RejectedNetworksAccumulator accumulator;
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  accumulator.setCurrentPeer("fc00::2", "fsw002.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildDetails(/*neighborsMatched=*/2);
+
+  ASSERT_EQ(1, response.groups()->size());
+  const auto& group = response.groups()->at(0);
+  EXPECT_EQ(prefixOf("10.0.0.0/8"), folly::copy(group.prefix().value()));
+  ASSERT_EQ(2, group.neighbors()->size());
+  EXPECT_EQ("fc00::1", *group.neighbors()->at(0).peer_addr());
+  EXPECT_EQ("fsw002.p001.f01", *group.neighbors()->at(1).description());
+}
+
+/*
+ * The same (prefix, policy) seen twice for the current peer records that peer
+ * once. This is the back() de-duplication the class documents.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, RepeatedPathsRecordThePeerOnce) {
+  RejectedNetworksAccumulator accumulator;
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildDetails(/*neighborsMatched=*/1);
+
+  ASSERT_EQ(1, response.groups()->size());
+  EXPECT_EQ(1, response.groups()->at(0).neighbors()->size());
+  // Two denied paths for one prefix: per-path totals still count both.
+  EXPECT_EQ(2, folly::copy(response.total_rejected_paths().value()));
+  EXPECT_EQ(
+      1,
+      folly::copy(
+          response.by_policy()->at("Denied by CRF").prefix_count().value()));
+}
+
+/*
+ * Past the tracked-key cap the group list and prefix_count both stop, but the
+ * per-path totals keep counting: path_count and total_rejected_paths need no
+ * per-key state, so they still describe the whole walk. prefix_count is the
+ * one field the cap bounds, which `truncated` reports on both responses.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, TrackingCapBoundsPrefixCountOnly) {
+  RejectedNetworksAccumulator accumulator{{.maxTrackedKeys = 1}};
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  reject(accumulator, "11.0.0.0/8", "Denied by CRF");
+  reject(accumulator, "12.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildDetails(/*neighborsMatched=*/1);
+
+  EXPECT_EQ(1, response.groups()->size());
+  EXPECT_TRUE(folly::copy(response.truncated().value()));
+  EXPECT_EQ(3, folly::copy(response.total_rejected_paths().value()));
+
+  const auto& stats = response.by_policy()->at("Denied by CRF");
+  EXPECT_EQ(1, folly::copy(stats.prefix_count().value()));
+  EXPECT_EQ(3, folly::copy(stats.path_count().value()));
+  EXPECT_EQ(1, folly::copy(stats.neighbor_count().value()));
+}
+
+/*
+ * A (prefix, policy) key first seen past the cap must not be counted again
+ * when a later peer rejects it. Regression guard: an earlier version counted
+ * prefix_count on first sight and returned before recording the key, so every
+ * re-sighting of an untracked key looked like a new prefix -- with many peers
+ * running the same deny policy over overlapping RIB-OUTs, prefix_count could
+ * run away past the true count.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, RepeatedKeyPastCapIsNotRecounted) {
+  RejectedNetworksAccumulator accumulator{{.maxTrackedKeys = 1}};
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  // Cap is now full; this key is never tracked.
+  reject(accumulator, "11.0.0.0/8", "Denied by CRF");
+  accumulator.setCurrentPeer("fc00::2", "fsw002.p001.f01");
+  reject(accumulator, "11.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildDetails(/*neighborsMatched=*/2);
+
+  const auto& stats = response.by_policy()->at("Denied by CRF");
+  // Two distinct prefixes were rejected, one of them tracked.
+  EXPECT_EQ(1, folly::copy(stats.prefix_count().value()));
+  EXPECT_EQ(3, folly::copy(stats.path_count().value()));
+  EXPECT_EQ(2, folly::copy(stats.neighbor_count().value()));
+  EXPECT_EQ(3, folly::copy(response.total_rejected_paths().value()));
+  EXPECT_TRUE(folly::copy(response.truncated().value()));
+}
+
+/*
+ * A zero tracked-key cap suppresses every group and leaves prefix_count at
+ * zero, while the per-path totals still describe the walk.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, ZeroTrackingCapSuppressesAllGroups) {
+  RejectedNetworksAccumulator accumulator{{.maxTrackedKeys = 0}};
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildDetails(/*neighborsMatched=*/1);
+
+  EXPECT_TRUE(response.groups()->empty());
+  EXPECT_TRUE(folly::copy(response.truncated().value()));
+  EXPECT_EQ(1, folly::copy(response.total_rejected_paths().value()));
+
+  const auto& stats = response.by_policy()->at("Denied by CRF");
+  EXPECT_EQ(0, folly::copy(stats.prefix_count().value()));
+  EXPECT_EQ(1, folly::copy(stats.path_count().value()));
+}
+
+/*
+ * The group limit (the caller's max_groups) caps the returned list without
+ * disturbing any total -- including prefix_count, since keys past the group
+ * limit are still tracked, just without a group behind them.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, GroupLimitDoesNotBoundPrefixCount) {
+  RejectedNetworksAccumulator accumulator{{.maxGroups = 1}};
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  reject(accumulator, "11.0.0.0/8", "Denied by CRF");
+  reject(accumulator, "12.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildDetails(/*neighborsMatched=*/1);
+
+  EXPECT_EQ(1, response.groups()->size());
+  EXPECT_TRUE(folly::copy(response.truncated().value()));
+  EXPECT_EQ(3, folly::copy(response.total_rejected_paths().value()));
+  EXPECT_EQ(
+      3,
+      folly::copy(
+          response.by_policy()->at("Denied by CRF").prefix_count().value()));
+}
+
+/*
+ * The summary builds no groups at all, and not building them is not
+ * truncation: the summary never promised a breakdown.
+ */
+TEST_F(
+    RejectedNetworksAccumulatorTest,
+    SummaryBuildsNoGroupsAndIsNotTruncated) {
+  RejectedNetworksAccumulator accumulator{{.maxGroups = 0}};
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  reject(accumulator, "11.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildSummary(/*neighborsMatched=*/1);
+
+  EXPECT_FALSE(folly::copy(response.truncated().value()));
+  EXPECT_EQ(
+      2,
+      folly::copy(
+          response.by_policy()->at("Denied by CRF").prefix_count().value()));
+}
+
+/*
+ * The neighbor cap bounds the entries across all groups, which the group cap
+ * alone does not: every peer can add itself to every group. Past it neighbor
+ * lists stop growing and details reports truncated, while neighbor_count --
+ * which needs no list -- stays exact.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, NeighborCapBoundsEntriesNotTotals) {
+  RejectedNetworksAccumulator accumulator{{.maxNeighbors = 2}};
+
+  for (const auto& peer : {"fc00::1", "fc00::2", "fc00::3"}) {
+    accumulator.setCurrentPeer(peer, "");
+    reject(accumulator, "10.0.0.0/8", "Denied by CRF");
+  }
+
+  const auto response = accumulator.buildDetails(/*neighborsMatched=*/3);
+
+  ASSERT_EQ(1, response.groups()->size());
+  EXPECT_EQ(2, response.groups()->at(0).neighbors()->size());
+  EXPECT_TRUE(folly::copy(response.truncated().value()));
+
+  const auto& stats = response.by_policy()->at("Denied by CRF");
+  EXPECT_EQ(3, folly::copy(stats.neighbor_count().value()));
+  EXPECT_EQ(3, folly::copy(stats.path_count().value()));
+  EXPECT_EQ(1, folly::copy(stats.prefix_count().value()));
+}
+
+/*
+ * A walk that counted more than it listed may have hidden keys from
+ * prefix_count, so both responses report truncated.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, WalkTruncationMarksBothResponses) {
+  RejectedNetworksAccumulator summaryAccumulator{{.maxGroups = 0}};
+  summaryAccumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(summaryAccumulator, "10.0.0.0/8", "Denied by CRF");
+  summaryAccumulator.markTruncated();
+  EXPECT_TRUE(
+      folly::copy(summaryAccumulator.buildSummary(/*neighborsMatched=*/1)
+                      .truncated()
+                      .value()));
+
+  RejectedNetworksAccumulator detailsAccumulator;
+  detailsAccumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(detailsAccumulator, "10.0.0.0/8", "Denied by CRF");
+  detailsAccumulator.markTruncated();
+  EXPECT_TRUE(
+      folly::copy(detailsAccumulator.buildDetails(/*neighborsMatched=*/1)
+                      .truncated()
+                      .value()));
+}
+
+/*
+ * A rejection with no recorded policy term rolls up under the empty key rather
+ * than a made-up "Unknown" name, so a caller can tell it apart from a policy
+ * that is genuinely called that.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, EmptyPolicyNameIsItsOwnRollupKey) {
+  RejectedNetworksAccumulator accumulator;
+
+  accumulator.setCurrentPeer("fc00::1", "fsw001.p001.f01");
+  reject(accumulator, "10.0.0.0/8", "");
+  reject(accumulator, "11.0.0.0/8", "Denied by CRF");
+
+  const auto response = accumulator.buildSummary(/*neighborsMatched=*/1);
+
+  ASSERT_EQ(2, response.by_policy()->size());
+  EXPECT_EQ(
+      1, folly::copy(response.by_policy()->at("").prefix_count().value()));
+}
+
+/*
+ * peers_failed carries neighbors whose walk did not complete, so a caller can
+ * tell an empty result apart from an incomplete one.
+ */
+TEST_F(RejectedNetworksAccumulatorTest, FailedPeersAreReportedSeparately) {
+  RejectedNetworksAccumulator accumulator;
+
+  accumulator.addFailedPeers(1);
+  accumulator.addFailedPeers(2);
+
+  const auto response = accumulator.buildSummary(/*neighborsMatched=*/3);
+
+  EXPECT_EQ(3, folly::copy(response.peers_failed().value()));
+  EXPECT_EQ(3, folly::copy(response.neighbors_matched().value()));
+  EXPECT_TRUE(response.by_policy()->empty());
+}
+
+/*
+ * compileOptionalRegex: an empty pattern is "no filter", not an error, and a
+ * malformed one fails rather than silently widening the request.
+ */
+TEST_F(BgpServiceUtilTest, CompileOptionalRegex) {
+  std::shared_ptr<re2::RE2> out;
+
+  EXPECT_TRUE(compileOptionalRegex("", out, "neighbor name"));
+  EXPECT_EQ(nullptr, out);
+
+  EXPECT_TRUE(compileOptionalRegex("^rsw001", out, "neighbor name"));
+  ASSERT_NE(nullptr, out);
+  EXPECT_TRUE(re2::RE2::PartialMatch("rsw001.p001.f01", *out));
+
+  std::shared_ptr<re2::RE2> bad;
+  EXPECT_FALSE(compileOptionalRegex("*invalid(", bad, "policy name"));
+  EXPECT_EQ(nullptr, bad);
+}
+
 } // namespace facebook::bgp

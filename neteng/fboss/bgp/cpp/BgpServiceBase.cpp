@@ -1156,6 +1156,230 @@ BgpServiceBase::co_getPostfilterAdvertisedNetworks2(
   co_return std::make_unique<std::map<TIpPrefix, std::vector<TBgpPath>>>();
 }
 
+namespace {
+
+/*
+ * INGRESS and EGRESS are the two directions this endpoint can serve. BOTH is
+ * not one of them -- rejection is resolved against a single Adj-RIB per walk
+ * -- so it is refused here rather than answered for one side.
+ */
+bool isServableDirection(TDirectionFilter direction) {
+  switch (direction) {
+    case TDirectionFilter::INGRESS:
+    case TDirectionFilter::EGRESS:
+      return true;
+    case TDirectionFilter::BOTH:
+      break;
+  }
+  return false;
+}
+
+/*
+ * Shared by both getRejectedNetworks* handlers so they apply identical
+ * filtering, peer resolution and walk semantics. Returns the number of
+ * neighbors the filters matched, or nullopt if the request was refused before
+ * any peer was walked.
+ *
+ * Both event base hops -- peer resolution here and each per-peer walk in
+ * co_walkRejectedNetworkPeers -- are individually wrapped in
+ * co_runOnEvbWithTimeout, so callers do not add timeout protection of their
+ * own: this coroutine itself does no evb work to protect.
+ */
+folly::coro::Task<std::optional<int32_t>> co_walkRejectedNetworks(
+    PeerManagerBase& peerMgr,
+    const TRejectedNetworksRequest& request,
+    RejectedNetworksAccumulator& accumulator) {
+  const auto direction = folly::copy(request.direction().value());
+  if (!isServableDirection(direction)) {
+    XLOGF(
+        ERR,
+        "getRejectedNetworks: unsupported direction {}",
+        magic_enum::enum_name(direction));
+    co_return std::nullopt;
+  }
+
+  /*
+   * Everything the evb lambdas below touch is captured by value, with the
+   * regexes behind shared_ptr because re2::RE2 is neither copyable nor
+   * movable. co_runOnEvbWithTimeout abandons the *wait* when the timeout
+   * fires but cannot cancel work already queued on the event base, so a
+   * lambda may still run after this coroutine has returned and its frame has
+   * been destroyed. Owning its inputs keeps that late run harmless instead of
+   * a use-after-free -- and a wedged peer manager evb is exactly the case the
+   * timeout exists for.
+   */
+  std::shared_ptr<re2::RE2> nameFilter;
+  std::shared_ptr<re2::RE2> policyFilter;
+  if (!compileOptionalRegex(
+          *request.neighbor_name_regex(), nameFilter, "neighbor name") ||
+      !compileOptionalRegex(
+          *request.policy_name_regex(), policyFilter, "policy name")) {
+    co_return std::nullopt;
+  }
+
+  auto peersResult = co_await co_runOnEvbWithTimeout(
+      peerMgr.getEventBase(),
+      [&peerMgr, nameFilter, peers = *request.peers()]() {
+        return peerMgr.resolveRejectedNetworkPeers(nameFilter.get(), peers);
+      },
+      kPeerMgrThriftHandlerTimeout);
+
+  if (peersResult.hasException()) {
+    XLOGF(
+        ERR,
+        "getRejectedNetworks: failed to resolve peers: {}",
+        peersResult.exception().what());
+    co_return std::nullopt;
+  }
+
+  const auto& peerIds = peersResult.value();
+  const RejectedNetworksWalk walk{
+      .direction = direction,
+      .policyFilter = std::move(policyFilter),
+      .prefixFilter = {request.prefixes()->begin(), request.prefixes()->end()},
+      .afi = request.afi().to_optional()};
+  co_await co_walkRejectedNetworkPeers(
+      peerMgr, peerIds, walk, accumulator, kPeerMgrThriftHandlerTimeout);
+
+  co_return static_cast<int32_t>(peerIds.size());
+}
+
+} // namespace
+
+folly::coro::Task<void> co_walkRejectedNetworkPeers(
+    PeerManagerBase& peerMgr,
+    const std::vector<nettools::bgplib::BgpPeerId>& peerIds,
+    const RejectedNetworksWalk& walk,
+    RejectedNetworksAccumulator& accumulator,
+    std::chrono::milliseconds timeout) {
+  /*
+   * One evb hop per peer. Walking every peer inside a single hop would hold
+   * the PeerManager event base for the whole scan and stall BGP on a device
+   * with a large RIB and many peers.
+   */
+  for (size_t i = 0; i < peerIds.size(); ++i) {
+    co_await folly::coro::co_safe_point;
+
+    const auto& peerId = peerIds[i];
+    auto result = co_await co_runOnEvbWithTimeout(
+        peerMgr.getEventBase(),
+        [&peerMgr, peerId, walk]() {
+          const RejectedNetworksQuery query{
+              .direction = walk.direction,
+              .policyNameFilter = walk.policyFilter.get(),
+              .prefixFilter = walk.prefixFilter,
+              .afi = walk.afi,
+              .maxEntries = kMaxTrackedRejectedGroups};
+          return peerMgr.getRejectedNetworksForPeer(peerId, query);
+        },
+        timeout);
+
+    if (result.hasException()) {
+      if (result.exception().is_compatible_with<folly::FutureTimeout>()) {
+        /*
+         * The timed-out walk stays queued on the event base; it cannot be
+         * cancelled. Queuing the next peer's walk behind it would only pile
+         * more work onto an event base that is already not keeping up.
+         */
+        const auto abandoned = peerIds.size() - i;
+        XLOGF(
+            ERR,
+            "getRejectedNetworks: walk timed out for peer {}, abandoning it "
+            "and the {} peer(s) not yet walked",
+            peerId.peerAddr.str(),
+            abandoned - 1);
+        accumulator.addFailedPeers(static_cast<int32_t>(abandoned));
+        co_return;
+      }
+      XLOGF(
+          ERR,
+          "getRejectedNetworks: walk failed for peer {}: {}",
+          peerId.peerAddr.str(),
+          result.exception().what());
+      accumulator.addFailedPeers(1);
+      continue;
+    }
+
+    const auto& rejected = result.value();
+    accumulator.setCurrentPeer(peerId.peerAddr.str(), peerId.peerDescription);
+    for (const auto& [policyName, count] : rejected.pathCountByPolicy) {
+      accumulator.addRejectedPaths(policyName, count);
+    }
+    for (const auto& entry : rejected.entries) {
+      accumulator.addRejectedPrefix(entry.prefix, entry.policyName);
+    }
+    if (rejected.truncated) {
+      accumulator.markTruncated();
+    }
+  }
+}
+
+folly::coro::Task<std::unique_ptr<TRejectedNetworksSummaryResponse>>
+BgpServiceBase::co_getRejectedNetworksSummary(
+    std::unique_ptr<TRejectedNetworksRequest> request) {
+  auto log = LOG_THRIFT_CALL(DBG2);
+  if (exitInitiated_ || request == nullptr) {
+    auto errStr = exitInitiated_ ? "Session exits" : "Empty request";
+    XLOGF(
+        ERR,
+        "[{}]: Failed to get rejected networks summary. Error: {}",
+        kExitNullPtrLogPrefix,
+        errStr);
+    co_return std::make_unique<TRejectedNetworksSummaryResponse>();
+  }
+  if (!continueExecution(true)) {
+    co_return std::make_unique<TRejectedNetworksSummaryResponse>();
+  }
+  SCOPE_EXIT {
+    decrRequestsInExecution();
+  };
+
+  RejectedNetworksAccumulator accumulator{{.maxGroups = 0}};
+  auto matched =
+      co_await co_walkRejectedNetworks(peerMgr_, *request, accumulator);
+  if (!matched.has_value()) {
+    co_return std::make_unique<TRejectedNetworksSummaryResponse>();
+  }
+
+  co_return std::make_unique<TRejectedNetworksSummaryResponse>(
+      accumulator.buildSummary(*matched));
+}
+
+folly::coro::Task<std::unique_ptr<TRejectedNetworksDetailsResponse>>
+BgpServiceBase::co_getRejectedNetworksDetails(
+    std::unique_ptr<TRejectedNetworksRequest> request) {
+  auto log = LOG_THRIFT_CALL(DBG2);
+  if (exitInitiated_ || request == nullptr) {
+    auto errStr = exitInitiated_ ? "Session exits" : "Empty request";
+    XLOGF(
+        ERR,
+        "[{}]: Failed to get rejected networks details. Error: {}",
+        kExitNullPtrLogPrefix,
+        errStr);
+    co_return std::make_unique<TRejectedNetworksDetailsResponse>();
+  }
+  if (!continueExecution(true)) {
+    co_return std::make_unique<TRejectedNetworksDetailsResponse>();
+  }
+  SCOPE_EXIT {
+    decrRequestsInExecution();
+  };
+
+  const auto maxGroups = folly::copy(request->max_groups().value());
+  RejectedNetworksAccumulator accumulator{
+      {.maxGroups = maxGroups > 0
+           ? std::min(static_cast<size_t>(maxGroups), kMaxTrackedRejectedGroups)
+           : kMaxTrackedRejectedGroups}};
+  auto matched =
+      co_await co_walkRejectedNetworks(peerMgr_, *request, accumulator);
+  if (!matched.has_value()) {
+    co_return std::make_unique<TRejectedNetworksDetailsResponse>();
+  }
+
+  co_return std::make_unique<TRejectedNetworksDetailsResponse>(
+      accumulator.buildDetails(*matched));
+}
+
 // Get post-policy network information for stream subscribers
 folly::coro::Task<std::unique_ptr<std::map<TIpPrefix, std::vector<TBgpPath>>>>
 BgpServiceBase::co_getSubscriberNetworkInfo(

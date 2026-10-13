@@ -844,6 +844,93 @@ TEST_F(
       Contains(ContainsRegex(kExitNullPtrLogPrefix)));
 }
 
+// test co_getRejectedNetworksSummary
+TEST_F(
+    BgpServiceBaseNullPtrTestFixture,
+    GetRejectedNetworksSummaryNullPtrTest) {
+  // @lint-ignore CLANGTIDY facebook-thrift-handler-direct-call
+  folly::coro::blockingWait(service_->co_getRejectedNetworksSummary(nullptr));
+  EXPECT_THAT(
+      logHandler_->getMessageValues(),
+      Contains(ContainsRegex(kExitNullPtrLogPrefix)));
+}
+
+// test co_getRejectedNetworksDetails
+TEST_F(
+    BgpServiceBaseNullPtrTestFixture,
+    GetRejectedNetworksDetailsNullPtrTest) {
+  // @lint-ignore CLANGTIDY facebook-thrift-handler-direct-call
+  folly::coro::blockingWait(service_->co_getRejectedNetworksDetails(nullptr));
+  EXPECT_THAT(
+      logHandler_->getMessageValues(),
+      Contains(ContainsRegex(kExitNullPtrLogPrefix)));
+}
+
+/*
+ * TDirectionFilter::BOTH is a value this endpoint cannot serve, since rejection
+ * is resolved against one Adj-RIB per walk. It must be refused rather than
+ * silently answered for one of the two directions.
+ */
+TEST_F(BgpServiceBaseNullPtrTestFixture, GetRejectedNetworksBothDirectionTest) {
+  auto request = std::make_unique<TRejectedNetworksRequest>();
+  request->direction() = TDirectionFilter::BOTH;
+
+  auto response = folly::coro::blockingWait(
+      // @lint-ignore CLANGTIDY facebook-thrift-handler-direct-call
+      service_->co_getRejectedNetworksDetails(std::move(request)));
+
+  EXPECT_TRUE(response->groups()->empty());
+  EXPECT_TRUE(response->by_policy()->empty());
+  EXPECT_THAT(
+      logHandler_->getMessageValues(),
+      Contains(ContainsRegex("unsupported direction")));
+}
+
+/*
+ * A regex the caller mistyped must fail the request loudly. Falling back to
+ * "match everything" would silently widen a fleet-wide query.
+ */
+TEST_F(
+    BgpServiceBaseNullPtrTestFixture,
+    GetRejectedNetworksInvalidNeighborRegexTest) {
+  auto request = std::make_unique<TRejectedNetworksRequest>();
+  request->neighbor_name_regex() = "*invalid(";
+
+  auto response = folly::coro::blockingWait(
+      // @lint-ignore CLANGTIDY facebook-thrift-handler-direct-call
+      service_->co_getRejectedNetworksDetails(std::move(request)));
+
+  EXPECT_TRUE(response->groups()->empty());
+  EXPECT_EQ(0, folly::copy(response->neighbors_matched().value()));
+  EXPECT_THAT(
+      logHandler_->getMessageValues(),
+      Contains(ContainsRegex("invalid neighbor name regex")));
+}
+
+TEST_F(
+    BgpServiceBaseNullPtrTestFixture,
+    GetRejectedNetworksInvalidPolicyRegexTest) {
+  auto request = std::make_unique<TRejectedNetworksRequest>();
+  request->policy_name_regex() = "*invalid(";
+
+  auto response = folly::coro::blockingWait(
+      // @lint-ignore CLANGTIDY facebook-thrift-handler-direct-call
+      service_->co_getRejectedNetworksDetails(std::move(request)));
+
+  EXPECT_TRUE(response->groups()->empty());
+  EXPECT_THAT(
+      logHandler_->getMessageValues(),
+      Contains(ContainsRegex("invalid policy name regex")));
+}
+
+/*
+ * The well-formed-request path is not exercised here: this fixture never runs
+ * the peer manager event base, so any request that survives validation blocks
+ * for the full evb timeout. The direction mapping, both event base hops and all
+ * of the response aggregation are covered against a real running PeerManager in
+ * e2e:e2e_rejected_networks_handler_test.
+ */
+
 // test co_getSubscriberNetworkInfo
 TEST_F(BgpServiceBaseNullPtrTestFixture, GetSubscriberNetworkInfoNullPtrTest) {
   folly::coro::blockingWait(service_->co_getSubscriberNetworkInfo(1, nullptr));

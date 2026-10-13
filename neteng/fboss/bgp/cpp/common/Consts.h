@@ -206,6 +206,31 @@ constexpr auto kRibPolicyFileTermination = "END RIB POLICY BGP++";
 inline const uint32_t kDefaultPathID = 0;
 
 /*
+ * Hard bound on the number of distinct (prefix, policy) pairs a single
+ * getRejectedNetworks call tracks, independent of the caller's max_groups. It
+ * also caps the rejections each per-peer Adj-RIB walk lists. A peer with a
+ * deny-all egress policy rejects its entire RIB-OUT, so without this an
+ * ostensibly read-only call could allocate proportionally to RIB size. Past
+ * the cap the handler stops tracking new pairs but keeps counting paths and
+ * neighbors, so total_rejected_paths and the by_policy path_count /
+ * neighbor_count stay exact and only the per-prefix breakdown goes partial.
+ *
+ * Sized for a diagnostic, not for a full RIB dump: a real rejection set is a
+ * handful of policies over a bounded prefix list, and a response past this
+ * many groups costs more to build and serialize than it is worth reading. A
+ * caller that hits it should narrow the request rather than raise this.
+ */
+constexpr size_t kMaxTrackedRejectedGroups = 10000;
+
+/*
+ * Hard bound on the neighbor entries a getRejectedNetworksDetails response
+ * holds across all of its groups. The group cap above does not bound these:
+ * every walked peer can add itself to every tracked group, so without this
+ * the details response grows with groups x peers.
+ */
+constexpr size_t kMaxTrackedRejectedNeighbors = 100000;
+
+/*
  * placeholder value for ADD-PATH send-side changes
  * TODO: remove this var and replace it with generated IDs wherever it's used
  */

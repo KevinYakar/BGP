@@ -16,9 +16,13 @@
 
 #pragma once
 
+#include <chrono>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <folly/IPAddress.h>
 #include <folly/container/F14Map.h>
@@ -41,6 +45,8 @@ namespace facebook::bgp {
 using facebook::neteng::fboss::bgp::thrift::BgpInitializationEvent;
 using BgpInitializationMap =
     std::unordered_map<BgpInitializationEvent, int64_t>;
+
+class RejectedNetworksAccumulator;
 
 class BgpServiceBase
     : public facebook::neteng::fboss::bgp::thrift::TBgpServiceSvIf {
@@ -431,6 +437,30 @@ class BgpServiceBase
   co_getPostfilterAdvertisedNetworks2(
       std::unique_ptr<std::string> peer) override;
 
+  /*
+   * Per-policy rollup of the routes policy denied across the matching
+   * neighbors, aggregated on the device. Unlike the prefilter/postfilter pairs
+   * above, the response is proportional to the number of rejecting policies
+   * rather than to RIB size.
+   *
+   * Hops onto the PeerManager event base once per peer rather than once for
+   * the whole scan, so a wide request cannot monopolize that event base.
+   */
+  folly::coro::Task<std::unique_ptr<
+      facebook::neteng::fboss::bgp::thrift::TRejectedNetworksSummaryResponse>>
+  co_getRejectedNetworksSummary(
+      std::unique_ptr<
+          facebook::neteng::fboss::bgp::thrift::TRejectedNetworksRequest>
+          request) override;
+
+  /* As above, plus the per-(prefix, policy) breakdown. */
+  folly::coro::Task<std::unique_ptr<
+      facebook::neteng::fboss::bgp::thrift::TRejectedNetworksDetailsResponse>>
+  co_getRejectedNetworksDetails(
+      std::unique_ptr<
+          facebook::neteng::fboss::bgp::thrift::TRejectedNetworksRequest>
+          request) override;
+
   folly::coro::Task<std::unique_ptr<std::map<
       facebook::neteng::fboss::bgp_attr::TIpPrefix,
       std::vector<facebook::neteng::fboss::bgp::thrift::TBgpPath>>>>
@@ -664,4 +694,35 @@ class BgpServiceBase
   BgpServiceBase_TEST_FRIENDS
 #endif
 };
+
+/*
+ * The per-peer filters of a getRejectedNetworks* request. Held by value, with
+ * the regex behind a shared_ptr, so an event-base lambda can own a copy that
+ * outlives the coroutine that built it.
+ */
+struct RejectedNetworksWalk {
+  facebook::neteng::fboss::bgp::thrift::TDirectionFilter direction{
+      facebook::neteng::fboss::bgp::thrift::TDirectionFilter::EGRESS};
+  std::shared_ptr<re2::RE2> policyFilter;
+  std::set<facebook::neteng::fboss::bgp_attr::TIpPrefix> prefixFilter;
+  std::optional<facebook::neteng::fboss::bgp_attr::TBgpAfi> afi;
+};
+
+/*
+ * Walks each of `peerIds` on the PeerManager event base, one hop per peer,
+ * feeding the results into `accumulator`. Each hop is bounded by `timeout`.
+ * The first hop to time out ends the walk: it and every peer not yet walked
+ * are reported as failed rather than queued behind an event base that is not
+ * keeping up.
+ *
+ * The getRejectedNetworks* handlers pass kPeerMgrThriftHandlerTimeout; the
+ * timeout is a parameter so a test can drive a wedged event base.
+ */
+folly::coro::Task<void> co_walkRejectedNetworkPeers(
+    PeerManagerBase& peerMgr,
+    const std::vector<nettools::bgplib::BgpPeerId>& peerIds,
+    const RejectedNetworksWalk& walk,
+    RejectedNetworksAccumulator& accumulator,
+    std::chrono::milliseconds timeout);
+
 } // namespace facebook::bgp

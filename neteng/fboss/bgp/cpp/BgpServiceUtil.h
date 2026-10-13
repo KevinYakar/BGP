@@ -16,18 +16,24 @@
 
 #pragma once
 
+#include <map>
+#include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <fmt/format.h>
 #include <folly/container/F14Map.h>
 #include <folly/container/F14Set.h>
+#include <re2/re2.h>
 #include <thrift/lib/cpp2/op/Get.h>
 #include "configerator/structs/neteng/bgp_policy/thrift/gen-cpp2/rib_policy_types.h"
 #include "configerator/structs/neteng/fboss/bgp/gen-cpp2/bgp_config_types.h"
 #include "neteng/fboss/bgp/cpp/common/BgpPath.h"
+#include "neteng/fboss/bgp/cpp/common/Consts.h"
 #include "neteng/fboss/bgp/cpp/common/IpPrefixUtils.h"
 #include "neteng/fboss/bgp/cpp/config/Config.h"
 #include "neteng/fboss/bgp/cpp/lib/BgpStructs.h"
@@ -214,5 +220,117 @@ std::unique_ptr<PeerToPolicyMap> resolveEffectivePeerPolicies(
 std::vector<std::string> getUnsupportedBgpPeerFields(
     const thrift::BgpPeer& peer,
     const folly::F14FastSet<std::string_view>& allowedFields);
+
+/**
+ * Compiles an optional RE2 filter into `out`. An empty pattern is not a
+ * filter, so it leaves `out` null and succeeds. Returns false when the caller
+ * supplied a pattern that does not compile, so the handler can fail the
+ * request rather than silently matching everything.
+ */
+bool compileOptionalRegex(
+    const std::string& pattern,
+    std::shared_ptr<re2::RE2>& out,
+    std::string_view what);
+
+/**
+ * Memory bounds for RejectedNetworksAccumulator. Each is independent of the
+ * others, so every allocation the accumulator makes is bounded on its own.
+ */
+struct RejectedNetworksLimits {
+  /*
+   * Distinct (prefix, policy) keys tracked, which is what prefix_count counts.
+   * Keys are cheap -- no neighbor list -- so this can exceed maxGroups.
+   */
+  size_t maxTrackedKeys{kMaxTrackedRejectedGroups};
+  /* Groups built for the details response. 0 builds none, for the summary. */
+  size_t maxGroups{kMaxTrackedRejectedGroups};
+  /* Neighbor entries across all groups. */
+  size_t maxNeighbors{kMaxTrackedRejectedNeighbors};
+};
+
+/**
+ * Accumulates policy rejections across peers into the getRejectedNetworks
+ * thrift responses.
+ *
+ * Groups are keyed by (prefix, policy) and each records the neighbors that
+ * rejected it. Peers are fed one at a time via setCurrentPeer(), so a repeat
+ * of the current peer within a group can only be the immediately preceding
+ * entry, and de-duplication is a back() comparison rather than a per-group
+ * set.
+ *
+ * Past maxTrackedKeys the accumulator stops tracking new keys entirely and
+ * both responses report truncated. total_rejected_paths and the by_policy
+ * path_count / neighbor_count need no per-key state and stay exact;
+ * prefix_count stops at the cap and is a lower bound. Keeping it exact would
+ * mean holding every distinct key, which grows with RIB size -- the
+ * allocation the cap exists to bound.
+ *
+ * maxGroups and maxNeighbors only shape the details breakdown: hitting them
+ * truncates the details response, never the summary, and leaves prefix_count
+ * exact.
+ */
+class RejectedNetworksAccumulator {
+ public:
+  explicit RejectedNetworksAccumulator(RejectedNetworksLimits limits = {})
+      : limits_{limits} {}
+
+  /* Every subsequent addRejected*() is attributed to this neighbor. */
+  void setCurrentPeer(std::string peerAddr, std::string description);
+
+  /*
+   * Neighbors counted in neighbors_matched whose walk did not complete.
+   * Surfaced as peers_failed so a caller can tell an empty result apart from
+   * an incomplete one.
+   */
+  void addFailedPeers(int32_t count);
+
+  /* `count` rejected paths by `policyName` on the current peer. */
+  void addRejectedPaths(const std::string& policyName, int64_t count);
+
+  /*
+   * One rejected (prefix, policy) on the current peer, for prefix_count and
+   * the details breakdown. Path counting is addRejectedPaths()'s job, so a
+   * peer's walk may list fewer prefixes than it counted paths.
+   */
+  void addRejectedPrefix(
+      const neteng::fboss::bgp_attr::TIpPrefix& prefix,
+      const std::string& policyName);
+
+  /*
+   * A peer's walk counted rejections it did not list, so prefix_count may
+   * have missed keys. Truncates both responses, like the key cap.
+   */
+  void markTruncated();
+
+  neteng::fboss::bgp::thrift::TRejectedNetworksSummaryResponse buildSummary(
+      int32_t neighborsMatched);
+
+  neteng::fboss::bgp::thrift::TRejectedNetworksDetailsResponse buildDetails(
+      int32_t neighborsMatched);
+
+ private:
+  void addCurrentPeerTo(
+      neteng::fboss::bgp::thrift::TRejectedPrefixGroup& group);
+
+  /* nullopt for a key tracked for prefix_count without a group behind it. */
+  std::map<
+      std::pair<neteng::fboss::bgp_attr::TIpPrefix, std::string>,
+      std::optional<size_t>>
+      keyIndex_;
+  std::vector<neteng::fboss::bgp::thrift::TRejectedPrefixGroup> groups_;
+  std::map<std::string, neteng::fboss::bgp::thrift::TRejectedPolicyStats>
+      byPolicy_;
+  std::map<std::string, std::set<std::string>> policyPeers_;
+  std::string peerAddr_;
+  std::string description_;
+  RejectedNetworksLimits limits_;
+  size_t neighborEntries_{0};
+  int64_t totalPaths_{0};
+  int32_t peersFailed_{0};
+  /* prefix_count is a lower bound; truncates both responses. */
+  bool keysTruncated_{false};
+  /* The groups breakdown is partial; truncates only the details response. */
+  bool groupsTruncated_{false};
+};
 
 } // namespace facebook::bgp

@@ -465,4 +465,135 @@ std::vector<std::string> getUnsupportedBgpPeerFields(
   return result;
 }
 
+bool compileOptionalRegex(
+    const std::string& pattern,
+    std::shared_ptr<re2::RE2>& out,
+    std::string_view what) {
+  if (pattern.empty()) {
+    return true;
+  }
+  auto regex = std::make_shared<re2::RE2>(pattern);
+  if (!regex->ok()) {
+    XLOGF(
+        ERR,
+        "getRejectedNetworks: invalid {} regex '{}': {}",
+        what,
+        pattern,
+        regex->error());
+    return false;
+  }
+  out = std::move(regex);
+  return true;
+}
+
+void RejectedNetworksAccumulator::setCurrentPeer(
+    std::string peerAddr,
+    std::string description) {
+  peerAddr_ = std::move(peerAddr);
+  description_ = std::move(description);
+}
+
+void RejectedNetworksAccumulator::addFailedPeers(int32_t count) {
+  peersFailed_ += count;
+}
+
+void RejectedNetworksAccumulator::addRejectedPaths(
+    const std::string& policyName,
+    int64_t count) {
+  totalPaths_ += count;
+
+  auto& stats = byPolicy_[policyName];
+  stats.path_count() = folly::copy(stats.path_count().value()) + count;
+  if (policyPeers_[policyName].insert(peerAddr_).second) {
+    stats.neighbor_count() = folly::copy(stats.neighbor_count().value()) + 1;
+  }
+}
+
+void RejectedNetworksAccumulator::addRejectedPrefix(
+    const TIpPrefix& prefix,
+    const std::string& policyName) {
+  auto key = std::make_pair(prefix, policyName);
+  auto it = keyIndex_.find(key);
+  if (it == keyIndex_.end()) {
+    if (keyIndex_.size() >= limits_.maxTrackedKeys) {
+      /*
+       * Past the cap the key is dropped rather than recorded. Recording it --
+       * even as a bare index entry -- would grow keyIndex_ with the number of
+       * distinct (prefix, policy) pairs, i.e. with RIB size, which is the
+       * allocation this cap exists to bound.
+       *
+       * The cost is that prefix_count stops at the cap and becomes a lower
+       * bound, which `truncated` reports and the thrift API documents.
+       */
+      keysTruncated_ = true;
+      return;
+    }
+
+    auto& stats = byPolicy_[policyName];
+    stats.prefix_count() = folly::copy(stats.prefix_count().value()) + 1;
+
+    std::optional<size_t> groupIdx;
+    if (groups_.size() < limits_.maxGroups) {
+      groupIdx = groups_.size();
+      auto& group = groups_.emplace_back();
+      group.prefix() = prefix;
+      group.policy_name() = policyName;
+    } else {
+      groupsTruncated_ = true;
+    }
+    it = keyIndex_.emplace(std::move(key), groupIdx).first;
+  }
+
+  if (!it->second.has_value()) {
+    return;
+  }
+  CHECK_LT(*it->second, groups_.size());
+  // @lint-ignore CLANGTIDY facebook-hte-MemberUncheckedArrayBounds
+  addCurrentPeerTo(groups_.at(*it->second));
+}
+
+void RejectedNetworksAccumulator::addCurrentPeerTo(
+    TRejectedPrefixGroup& group) {
+  auto& neighbors = *group.neighbors();
+  if (!neighbors.empty() && *neighbors.back().peer_addr() == peerAddr_) {
+    return;
+  }
+  if (neighborEntries_ >= limits_.maxNeighbors) {
+    groupsTruncated_ = true;
+    return;
+  }
+  TRejectedNeighbor neighbor;
+  neighbor.peer_addr() = peerAddr_;
+  neighbor.description() = description_;
+  neighbors.emplace_back(std::move(neighbor));
+  ++neighborEntries_;
+}
+
+void RejectedNetworksAccumulator::markTruncated() {
+  keysTruncated_ = true;
+}
+
+TRejectedNetworksSummaryResponse RejectedNetworksAccumulator::buildSummary(
+    int32_t neighborsMatched) {
+  TRejectedNetworksSummaryResponse response;
+  response.by_policy() = std::move(byPolicy_);
+  response.total_rejected_paths() = totalPaths_;
+  response.neighbors_matched() = neighborsMatched;
+  response.truncated() = keysTruncated_;
+  response.peers_failed() = peersFailed_;
+  return response;
+}
+
+TRejectedNetworksDetailsResponse RejectedNetworksAccumulator::buildDetails(
+    int32_t neighborsMatched) {
+  TRejectedNetworksDetailsResponse response;
+  response.groups() = std::move(groups_);
+  response.by_policy() = std::move(byPolicy_);
+  response.total_rejected_paths() = totalPaths_;
+  response.neighbors_matched() = neighborsMatched;
+  response.truncated() = keysTruncated_ || groupsTruncated_;
+  response.peers_failed() = peersFailed_;
+  return response;
+}
+
 } // namespace facebook::bgp
