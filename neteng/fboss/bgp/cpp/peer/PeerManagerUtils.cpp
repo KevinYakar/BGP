@@ -16,6 +16,7 @@
 
 #include <map>
 
+#include <folly/container/F14Set.h>
 #include <folly/logging/xlog.h>
 
 #include "common/network/AddressUtil.h"
@@ -1191,6 +1192,81 @@ void PeerManagerBase::getNetworks2(
     const auto adjRib = adjRibs_.at(peerId);
     adjRib->getNetworks2(prefixToPath, type);
   });
+}
+
+std::vector<BgpPeerId> PeerManagerBase::resolveRejectedNetworkPeers(
+    const re2::RE2* nameFilter,
+    const std::vector<std::string>& peers) noexcept {
+  std::vector<BgpPeerId> peerIds;
+
+  evb_.runImmediatelyOrRunInEventBaseThreadAndWait([&]() {
+    /*
+     * The explicit-peers branch below can reach the same neighbor twice --
+     * the caller's list is unvalidated and may repeat an address, and two
+     * spellings can normalize to one folly::IPAddress. A repeated id would
+     * make 3/3 walk that peer twice and count its rejections twice, so
+     * de-duplicate here rather than leaving it to the caller. Bounded by the
+     * neighbor count, not by RIB size.
+     */
+    folly::F14FastSet<BgpPeerId> seen;
+    auto addPeer = [&](const BgpPeerId& peerId, const AdjRib& adjRib) {
+      if (!seen.insert(peerId).second) {
+        return;
+      }
+      auto& added = peerIds.emplace_back(peerId);
+      added.peerDescription = adjRib.getPeeringParams().description;
+    };
+
+    if (peers.empty()) {
+      for (const auto& [peerId, adjRib] : adjRibs_) {
+        if (!adjRib) {
+          continue;
+        }
+        if (nameFilter &&
+            !re2::RE2::PartialMatch(
+                adjRib->getPeeringParams().description, *nameFilter)) {
+          continue;
+        }
+        addPeer(peerId, *adjRib);
+      }
+      return;
+    }
+
+    for (const auto& peer : peers) {
+      if (!folly::IPAddress::validate(peer)) {
+        continue;
+      }
+      const auto peerAddr = folly::IPAddress(peer);
+      if (!peerAddrToIds_.contains(peerAddr)) {
+        continue;
+      }
+      for (const auto& peerId : peerAddrToIds_.at(peerAddr)) {
+        const auto it = adjRibs_.find(peerId);
+        if (it == adjRibs_.end() || !it->second) {
+          continue;
+        }
+        addPeer(peerId, *it->second);
+      }
+    }
+  });
+
+  return peerIds;
+}
+
+RejectedNetworks PeerManagerBase::getRejectedNetworksForPeer(
+    const BgpPeerId& peerId,
+    const RejectedNetworksQuery& query) noexcept {
+  RejectedNetworks rejected;
+
+  evb_.runImmediatelyOrRunInEventBaseThreadAndWait([&]() {
+    const auto it = adjRibs_.find(peerId);
+    if (it == adjRibs_.end() || !it->second) {
+      return;
+    }
+    it->second->getRejectedNetworks(rejected, query);
+  });
+
+  return rejected;
 }
 
 void PeerManagerBase::getSubscriberNetworks(

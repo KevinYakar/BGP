@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 
 #include <boost/noncopyable.hpp>
 #include <fboss/lib/RadixTree.h>
@@ -34,6 +35,7 @@
 #include <folly/fibers/BatchSemaphore.h>
 #include <folly/futures/Future.h>
 #include <folly/memory/not_null.h>
+#include <re2/re2.h>
 
 #include "neteng/fboss/bgp/cpp/adjrib/AdjRibCommon.h"
 #include "neteng/fboss/bgp/cpp/adjrib/AdjRibEntry.h"
@@ -195,6 +197,85 @@ struct AdjRibOutDelayEntry {
 class AdjRibOutConsumer;
 class AdjRibOutGroup;
 class AdjRibOutGroupConsumer;
+
+/*
+ * A single route that policy denied, as reported by
+ * AdjRib::getRejectedNetworks. Deliberately minimal: the caller wants to know
+ * which prefix was dropped and why, not the route's attributes, so no
+ * TBgpPath is built.
+ */
+struct RejectedNetwork {
+  neteng::fboss::bgp_attr::TIpPrefix prefix;
+  /*
+   * Name of the policy that denied the route, e.g. "Denied by CRF". Empty
+   * when the entry records no policy term for the rejection.
+   */
+  std::string policyName;
+};
+
+/*
+ * Filters for AdjRib::getRejectedNetworks. An empty/unset filter matches
+ * everything. Filters are applied during the tree walk so that excluded
+ * entries never reach the result vector.
+ */
+struct RejectedNetworksQuery {
+  /*
+   * Which Adj-RIB the walk resolves against: INGRESS reads AdjRibIn (routes
+   * from this peer the ingress policy denied), EGRESS reads AdjRibOut (routes
+   * to this peer the egress policy or CRF denied).
+   *
+   * The PRE_/POST_ axis is not a free variable here, which is why this is not
+   * a RouteFilterType: an entry is rejected precisely when the pre-policy
+   * attributes exist and the post-policy ones do not, so rejection is a
+   * relation between the two views rather than a point on that axis. BOTH is
+   * likewise not servable -- a walk resolves against one Adj-RIB -- and the
+   * thrift handler refuses it before ever building a query.
+   */
+  neteng::fboss::bgp::thrift::TDirectionFilter direction{
+      neteng::fboss::bgp::thrift::TDirectionFilter::EGRESS};
+  /*
+   * Partial-matched against the rejecting policy name. A pointer rather than
+   * a value because re2::RE2 is neither copyable nor movable; null matches
+   * every rejection reason.
+   *
+   * NON-OWNING: the RE2 must outlive the query. Do not point it at a
+   * temporary. The thrift handler keeps the compiled regex in a shared_ptr
+   * that the event-base lambda captures by value, precisely because
+   * co_runOnEvbWithTimeout can leave a lambda running after the coroutine
+   * that built the query has returned.
+   */
+  const re2::RE2* policyNameFilter{nullptr};
+  /*
+   * Restricts the walk to these prefixes; empty matches every prefix.
+   * std::set rather than F14FastSet because TIpPrefix is ordered-comparable
+   * but not hashable, and this set is caller-sized (a short explicit prefix
+   * list), not RIB-sized.
+   */
+  std::set<neteng::fboss::bgp_attr::TIpPrefix> prefixFilter;
+  std::optional<neteng::fboss::bgp_attr::TBgpAfi> afi;
+  /*
+   * Caps RejectedNetworks::entries. A deny-all policy rejects a peer's whole
+   * Adj-RIB, and the walk runs on the PeerManager event base, so the thrift
+   * handler sets this to keep one peer's result bounded no matter how much
+   * policy denied. Rejections past it are still counted, not listed.
+   */
+  size_t maxEntries{std::numeric_limits<size_t>::max()};
+};
+
+/*
+ * One peer's result from AdjRib::getRejectedNetworks.
+ */
+struct RejectedNetworks {
+  /* The first RejectedNetworksQuery::maxEntries rejections, in walk order. */
+  std::vector<RejectedNetwork> entries;
+  /*
+   * Every rejection that passed the filters, per rejecting policy name,
+   * including those past maxEntries. Sized by the number of policies.
+   */
+  folly::F14FastMap<std::string, int64_t> pathCountByPolicy;
+  /* True when rejections past maxEntries were counted but not listed. */
+  bool truncated{false};
+};
 
 // Adjacency Rib
 class AdjRib : boost::noncopyable,
@@ -604,6 +685,44 @@ class AdjRib : boost::noncopyable,
           neteng::fboss::bgp_attr::TIpPrefix,
           std::vector<neteng::fboss::bgp::thrift::TBgpPath>>& prefixToPath,
       const RouteFilterType& type) noexcept;
+
+  /*
+   * Routes this peer's policy denied, for the getRejectedNetworks thrift API.
+   *
+   * Walks the same trees as getNetworks2, but instead of materializing pre-
+   * and post-policy views for the caller to diff, it tests each entry
+   * directly: an entry is rejected when its pre-policy attributes are set and
+   * its post-policy attributes are not. The rejecting policy name is already
+   * stored on the entry. Accumulates into `rejected` (does not clear it).
+   *
+   * EGRESS caveats for a peer in an update group. Both are properties of
+   * how the group RIB-OUT is built, not of this walk, and both are surfaced
+   * on the thrift API so callers can reason about them:
+   *   - No CRF rejections exist to report. AdjRibOutGroup::
+   *     getPostOutPolicyAttributesAndInfo applies the egress policy but skips
+   *     the egress route filter ("TODO: Add egress route filter (CRF) check
+   *     for group level"), so a group entry never carries "Denied by CRF".
+   *     Egress policy rejections are recorded on the group entry and are
+   *     reported normally.
+   *   - Group entries are shared, so one rejection recorded for the group is
+   *     reported once per member peer that resolves it -- which is the
+   *     per-neighbor answer the API promises. For a detached peer,
+   *     resolveLiteEntryForPeer gates on its detach version, so rejections
+   *     recorded after it detached are not visible for that peer.
+   */
+  void getRejectedNetworks(
+      RejectedNetworks& rejected,
+      const RejectedNetworksQuery& query) noexcept;
+
+  /*
+   * Records one entry in `rejected` if it was denied by policy and passes
+   * every filter in `query`. Shared by all four tree walks above.
+   */
+  static void maybeAddRejectedNetwork(
+      RejectedNetworks& rejected,
+      const folly::CIDRNetwork& prefix,
+      const AdjRibEntry& adjRibEntry,
+      const RejectedNetworksQuery& query) noexcept;
 
   /*******************************************************************************
    *             End   -    AdjRib show functionality

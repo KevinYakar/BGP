@@ -385,6 +385,41 @@ class PeerManagerBase : public BgpModuleBase, public MonitoredModule {
       const std::unique_ptr<std::string>& sessionBgpId,
       const RouteFilterType& type) noexcept;
 
+  /*
+   * Resolves which neighbors a getRejectedNetworks request applies to.
+   *
+   * When `peers` is non-empty it is treated as an explicit address list;
+   * otherwise every configured peer is considered and `nameFilter`, if set, is
+   * partial-matched against the peer description. That is the same match the
+   * "neighbors-by-name" CLI performs against TBgpSession.description, which is
+   * populated from this same PeeringParams field.
+   *
+   * Each returned id carries peerDescription populated from that same field,
+   * so the caller can label results without a second lookup or a
+   * SessionManager round-trip. peerDescription is part of neither BgpPeerId's
+   * operator== nor its hash, so the id remains a valid adjRibs_ key.
+   *
+   * The result is de-duplicated. `peers` comes straight off the wire and may
+   * name the same neighbor twice, directly or via two spellings of one
+   * address; without this the caller would walk that neighbor twice and
+   * double-count its rejections.
+   *
+   * Cheap: touches no route trees, so it is safe to run ahead of the per-peer
+   * walks and use the result to bound them.
+   */
+  std::vector<nettools::bgplib::BgpPeerId> resolveRejectedNetworkPeers(
+      const re2::RE2* nameFilter,
+      const std::vector<std::string>& peers) noexcept;
+
+  /*
+   * Routes policy denied for one peer. Split from the resolve step above so
+   * the thrift handler can hop onto this event base once per peer rather than
+   * holding it for an entire multi-peer scan.
+   */
+  RejectedNetworks getRejectedNetworksForPeer(
+      const nettools::bgplib::BgpPeerId& peerId,
+      const RejectedNetworksQuery& query) noexcept;
+
   void getSubscriberNetworks(
       std::map<
           facebook::neteng::fboss::bgp_attr::TIpPrefix,
