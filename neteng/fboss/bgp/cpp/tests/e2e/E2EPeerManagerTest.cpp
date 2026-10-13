@@ -135,6 +135,128 @@ INSTANTIATE_TEST_SUITE_P(
     });
 
 /*
+ * GR helper mode teardown, with a dynamic VIP peer (kDynamicPeerAddr4) and a
+ * static observer peer (kPeerAddr5). Parameterized on update groups: RSWs run
+ * with them disabled, the fixture default enables them.
+ */
+class GrHelperTest : public E2ETestFixture,
+                     public testing::WithParamInterface<bool> {
+ protected:
+  static constexpr uint16_t kGrRestartTimeSec = 10;
+  static constexpr uint16_t kNoExpiryGrRestartTimeSec = 120;
+  static constexpr int kWithdrawRetries = 30;
+
+  void SetUp() override {
+    setPeerGrRestartTimeSeconds(kNoExpiryGrRestartTimeSec);
+    // Static peers are only brought up by some tests; don't wait 45s for EoR.
+    setEorTimeSeconds(1);
+    peers_.push_back(createBgpPeer(
+        kVipAsn,
+        kLocalAddr2,
+        kPeerPrefix4,
+        kNextHopV4_2,
+        kNextHopV6_2,
+        true,
+        kPeerTypeShiv));
+    addPeer(kDefaultPeerSpec5);
+    createRib();
+    createPeerManager(/*enableUpdateGroup=*/GetParam());
+  }
+
+  void bringUpWithEoR(const folly::IPAddress& peerAddr) {
+    bringUpPeer(peerAddr);
+    BgpPeerId peerId{peerAddr, peerAddr.asV4().toLongHBO()};
+    sendEoRToPeer(peerId);
+    ASSERT_TRUE(waitForEoR(peerId));
+  }
+
+  // Session drop that leaves the AdjRib in GR helper mode.
+  void bringDownPeerInGrHelperMode(const folly::IPAddress& peerAddr) {
+    BgpPeerId peerId{peerAddr, peerAddr.asV4().toLongHBO()};
+    auto queues = getPeerQueues(peerId);
+    ASSERT_TRUE(queues.has_value());
+    if (queues->boundedAdjRibOutQ) {
+      queues->boundedAdjRibOutQ->close();
+    }
+    queues->adjRibInQ->fiberPush(
+        nettools::bgplib::FiberBgpPeer::BgpSessionStop{
+            .gracefulRestart = true});
+    ASSERT_TRUE(waitForSessionTerminationBaton(peerAddr));
+    completePeerSessionTermination(peerAddr);
+  }
+
+  // adjRibs_ is owned by the PeerManagerBase EVB, which erases from it.
+  std::shared_ptr<AdjRib> findAdjRibOnEvb(const folly::IPAddress& peerAddr) {
+    std::shared_ptr<AdjRib> adjRib;
+    peerManager_->getEventBase().runInEventBaseThreadAndWait(
+        [&] { adjRib = getAdjRibByAddr(peerAddr); });
+    return adjRib;
+  }
+
+  const BgpPeerId kVipPeerId{
+      kDynamicPeerAddr4,
+      kDynamicPeerAddr4.asV4().toLongHBO()};
+  const folly::CIDRNetwork kPrefix{
+      folly::IPAddress::createNetwork("10.0.0.0/8")};
+};
+
+/*
+ * A GR-capable dynamic VIP peer disconnects and does not come back. Its
+ * session is not deleted, its routes are kept through the GR window and
+ * withdrawn by the Remote-GR timer, and its AdjRib is left in place.
+ */
+TEST_P(GrHelperTest, VipWithGrKeepsStateAndWithdrawsRoutesOnGrExpiry) {
+  setPeerGrRestartTimeSeconds(kGrRestartTimeSec);
+  bringUpWithEoR(kDynamicPeerAddr4);
+  bringUpWithEoR(kPeerAddr5);
+  addRoute("v4", "10.0.0.0", 8, kDynamicPeerAddr4, "11.0.0.1", "65000");
+  ASSERT_TRUE(waitForRouteInShadowRib(kPrefix));
+  ASSERT_TRUE(verifyRouteAdd("v4", "10.0.0.0", 8, kPeerAddr5, "127.5.0.4"));
+  const auto adjRib = findAdjRibOnEvb(kDynamicPeerAddr4);
+  ASSERT_NE(nullptr, adjRib);
+  EXPECT_CALL(
+      *sessionManager_,
+      scheduleDeleteTerminatedSession(kVipPeerId, testing::_, testing::_))
+      .Times(0);
+
+  bringDownPeerInGrHelperMode(kDynamicPeerAddr4);
+
+  EXPECT_TRUE(waitForRouteInShadowRib(kPrefix))
+      << "VIP route should be kept as stale during the GR window";
+  EXPECT_TRUE(waitForRouteWithdrawnFromRib("10.0.0.0/8", kWithdrawRetries))
+      << "VIP route leaked past the " << kGrRestartTimeSec
+      << "s GR restart time";
+  EXPECT_TRUE(verifyRouteWithdraw("v4", "10.0.0.0", 8, kPeerAddr5));
+  EXPECT_EQ(adjRib, findAdjRibOnEvb(kDynamicPeerAddr4));
+}
+
+/*
+ * A GR-capable dynamic VIP peer disconnects and comes back within the GR
+ * window with the same BGP ID: it reuses its AdjRib.
+ */
+TEST_P(GrHelperTest, VipWithGrBackWithinGrWindowReusesAdjRib) {
+  bringUpWithEoR(kDynamicPeerAddr4);
+  addRoute("v4", "10.0.0.0", 8, kDynamicPeerAddr4, "11.0.0.1", "65000");
+  ASSERT_TRUE(waitForRouteInShadowRib(kPrefix));
+  const auto adjRib = findAdjRibOnEvb(kDynamicPeerAddr4);
+  ASSERT_NE(nullptr, adjRib);
+
+  bringDownPeerInGrHelperMode(kDynamicPeerAddr4);
+  bringUpPeer(kDynamicPeerAddr4, /*versionNumber=*/2);
+
+  EXPECT_EQ(adjRib, findAdjRibOnEvb(kDynamicPeerAddr4));
+  EXPECT_TRUE(waitForRouteInShadowRib(kPrefix));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    UpdateGroup,
+    GrHelperTest,
+    testing::Bool(),
+    [](const testing::TestParamInfo<bool>& info) {
+      return info.param ? "Enabled" : "Disabled";
+    });
+
+/*
  * Fixture that intentionally does NOT add peer3 — used to exercise delPeers
  * against a peer ID that was never registered.
  */

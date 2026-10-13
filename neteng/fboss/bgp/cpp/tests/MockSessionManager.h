@@ -39,7 +39,25 @@ class MockSessionManager : public SessionManager {
             enableCoroNotifyQueue) {
     boundedIqueue_ = boundedIqueue;
     oQueue_ = oQueue;
+    ON_CALL(
+        *this,
+        scheduleDeleteTerminatedSession(testing::_, testing::_, testing::_))
+        .WillByDefault([this](
+                           const nettools::bgplib::BgpPeerId& peerId,
+                           uint64_t terminatedVersion,
+                           uint32_t expectedRemoteAs) {
+          SessionManager::scheduleDeleteTerminatedSession(
+              peerId, terminatedVersion, expectedRemoteAs);
+        });
   }
+
+  MOCK_METHOD(
+      void,
+      scheduleDeleteTerminatedSession,
+      (const nettools::bgplib::BgpPeerId& peerId,
+       uint64_t terminatedVersion,
+       uint32_t expectedRemoteAs),
+      (noexcept, override));
   MOCK_METHOD(
       (folly::Expected<folly::Unit, SessionManager::ErrorCode>),
       stopDynamicPeerWithGracefulRestart,

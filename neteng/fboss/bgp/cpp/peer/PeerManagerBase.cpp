@@ -3127,7 +3127,10 @@ folly::coro::Task<void> PeerManagerBase::sessionTerminated(
 
   const auto remoteAs = adjRib->getRemoteAs();
   const bool isVipPeer = isDynamicVipPeer(peerAddr, remoteAs);
-  if (isVipPeer) {
+  // TODO: Temporary; remove once GR VIP peers are cleaned up on GR expiry.
+  const bool cleanupVipPeer =
+      isVipPeer && adjRib->getRemoteGrRestartTime() == 0s;
+  if (cleanupVipPeer) {
     sessionMgr_->scheduleDeleteTerminatedSession(
         peerId, versionNumber, kVipAsn);
   }
@@ -3225,7 +3228,7 @@ folly::coro::Task<void> PeerManagerBase::sessionTerminated(
   }
   adjRib->logPeerEvent("SHUTDOWN_COMPLETE", BGP_LOG_SRC());
 
-  if (evt.peerDelete || isVipPeer) {
+  if (evt.peerDelete || cleanupVipPeer) {
     XLOGF(
         INFO,
         "sessionTerminated for {}: peerDelete={}, remoteAs={}, running "

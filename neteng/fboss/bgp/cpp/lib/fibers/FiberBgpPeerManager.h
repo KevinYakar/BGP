@@ -748,7 +748,7 @@ class FiberBgpPeerManager
    * EventBase and return immediately. Removal revalidates the configuration
    * and lifecycle state; the address-level allPeers_ entry is retained.
    */
-  void scheduleDeleteTerminatedSession(
+  virtual void scheduleDeleteTerminatedSession(
       const BgpPeerId& peerId,
       uint64_t terminatedVersion,
       uint32_t expectedRemoteAs) noexcept;

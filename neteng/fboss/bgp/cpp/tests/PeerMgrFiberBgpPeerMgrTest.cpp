@@ -68,6 +68,9 @@ class PeerManagerTestFixture_SessionTerminated_ShutdownSkipsProcessing_Test;
   FRIEND_TEST(                                                                \
       PeerManagerTestFixture, SessionTerminated_VipErasesDynamicEorState);    \
   FRIEND_TEST(                                                                \
+      PeerManagerTestFixture,                                                 \
+      SessionTerminated_VipWithGrKeepsAdjRibAndSession);                      \
+  FRIEND_TEST(                                                                \
       PeerManagerTestFixture, SessionTerminated_ShutdownSkipsProcessing);     \
   FRIEND_TEST(                                                                \
       PeerManagerTestFixture,                                                 \
@@ -991,6 +994,65 @@ CO_TEST_F(PeerManagerTestFixture, SessionTerminated_VipErasesDynamicEorState) {
 
   EXPECT_EQ(0, peerMgr->adjRibs_.count(kDynamicPeerId4));
   EXPECT_EQ(0, peerMgr->dynamicPeerEoRReceived_.count(kDynamicPeerId4));
+}
+
+/*
+ * A dynamic VIP peer that advertised GR keeps its AdjRib and SessionManager
+ * session on disconnect, so its Remote-GR timer can withdraw the stale routes.
+ */
+CO_TEST_F(
+    PeerManagerTestFixture,
+    SessionTerminated_VipWithGrKeepsAdjRibAndSession) {
+  auto peerMgr = setupMockPeerManager(
+      false /* includeStaticPeer */,
+      false /* includeDynamicShivPeer */,
+      false /* includeDynamicMonitorPeer */,
+      true /* includeDynamicVipInjectorPeer */);
+  auto sessionMgr = std::dynamic_pointer_cast<MockSessionManager>(
+      peerMgr->getSessionManager());
+  CO_ASSERT_NE(nullptr, sessionMgr);
+  auto& evb = peerMgr->getEventBase();
+
+  auto terminateBaton = std::make_shared<folly::coro::Baton>();
+  auto mockAdjRib =
+      setupMockAdjRib(evb, kDynamicPeerId4, AsNum(kVipAsn), terminateBaton);
+  mockAdjRib->sessionEstablished(
+      kVipAsn,
+      std::optional<uint16_t>(30),
+      std::make_shared<AdjRib::AdjRibInQueueT>(),
+      std::make_shared<AdjRib::AdjRibOutQueueT>(
+          kMaxEgressQueueSize,
+          kEgressQueueHighWatermark,
+          kEgressQueueLowWatermark));
+  mockAdjRib->markStateEstablished();
+
+  peerMgr->initialized_ = true;
+  peerMgr->runningSessions_ = 1;
+  peerMgr->runningVipSessions_ = 1;
+  peerMgr->adjRibs_[kDynamicPeerId4] = mockAdjRib;
+  RibStats::incrAdjRibCount();
+  peerMgr->sessionTerminateBatons_[kDynamicPeerId4] = terminateBaton;
+  peerMgr->peerAddrToIds_[kDynamicPeerAddr4].insert(kDynamicPeerId4);
+  terminateBaton->post();
+
+  EXPECT_CALL(*mockAdjRib, stop()).Times(0);
+  EXPECT_CALL(
+      *sessionMgr,
+      scheduleDeleteTerminatedSession(kDynamicPeerId4, testing::_, testing::_))
+      .Times(0);
+
+  FiberBgpPeer::ObservableStateT evt{
+      .peerId = kDynamicPeerId4,
+      .state = nettools::bgplib::BgpSessionState::IDLE,
+      .versionNumber = 1,
+      .peerDelete = false,
+  };
+  co_await peerMgr->sessionTerminated(evt);
+
+  EXPECT_EQ(mockAdjRib, peerMgr->adjRibs_.at(kDynamicPeerId4));
+  EXPECT_FALSE(mockAdjRib->isStateEstablished());
+  EXPECT_EQ(0, peerMgr->runningSessions_);
+  EXPECT_EQ(0, peerMgr->runningVipSessions_);
 }
 
 CO_TEST_F(PeerManagerTestFixture, SessionTerminated_ShutdownSkipsProcessing) {

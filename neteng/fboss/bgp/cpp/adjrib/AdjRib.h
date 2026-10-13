@@ -1018,6 +1018,10 @@ class AdjRib : boost::noncopyable,
     return (!isSessionEstablished_ && remoteGrRestartTimer_ != nullptr);
   }
 
+  std::chrono::seconds getRemoteGrRestartTime() const noexcept {
+    return remoteGrRestartTime_;
+  }
+
   bool isV4OverV6NexthopNegotiated() const noexcept {
     return isV4OverV6NexthopNegotiated_;
   }
