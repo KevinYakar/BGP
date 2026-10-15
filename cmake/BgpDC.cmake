@@ -101,6 +101,7 @@ set(BGP_DC_FBOSS_LIBRARY_NAMES
   # client portions of the FsdbOperStateRoot model.
   transceiver_validation_cpp2
   sensor_config_cpp2
+  reboot_cause_config_cpp2
   qsfp_cpp2
 )
 
