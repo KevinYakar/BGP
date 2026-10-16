@@ -106,6 +106,15 @@ class BgpServiceBB : public BgpServiceBase {
   std::optional<folly::IPAddress> validatePeerAddress(
       const std::string& addrStr);
 
+  /*
+   * True when the peer is already configured exactly as requested, which lets
+   * a retried addPeers succeed instead of failing validateAddedPeer.
+   */
+  bool isExistingIdenticalPeer(
+      const facebook::bgp::thrift::BgpPeer& peer,
+      const folly::F14FastSet<std::string_view>& allowedFields,
+      const Config& currentConfig) const;
+
   bool validateAddedPeer(
       const facebook::bgp::thrift::BgpPeer& peer,
       const folly::F14FastSet<std::string_view>& allowedFields,

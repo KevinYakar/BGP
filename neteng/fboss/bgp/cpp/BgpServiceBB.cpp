@@ -36,6 +36,44 @@ static const std::string kExitNullPtrLogPrefix = "BgpServiceBBExitOrNullPtr";
 
 namespace facebook::bgp {
 
+namespace {
+
+void normalizeAddrField(std::string& addr) {
+  if (auto ip = folly::IPAddress::tryFromString(addr); ip.hasValue()) {
+    addr = ip->str();
+  }
+}
+
+/*
+ * Compares peer configs as written, before peer-group inheritance. Optional
+ * fields compare by presence too, so a field set on only one side (even to
+ * its default value) makes the configs differ. Address fields are normalized
+ * first so that equivalent spellings of the same IP are not a mismatch.
+ */
+bool isSamePeerConfig(thrift::BgpPeer lhs, thrift::BgpPeer rhs) {
+  for (auto* peer : {&lhs, &rhs}) {
+    normalizeAddrField(*peer->peer_addr());
+    normalizeAddrField(*peer->local_addr());
+    normalizeAddrField(*peer->next_hop4());
+    normalizeAddrField(*peer->next_hop6());
+  }
+  return lhs == rhs;
+}
+
+std::optional<thrift::BgpPeer> findConfiguredPeer(
+    const Config& config,
+    const folly::IPAddress& peerAddr) {
+  for (const auto& peer : *config.getConfig().peers()) {
+    auto addr = folly::IPAddress::tryFromString(*peer.peer_addr());
+    if (addr.hasValue() && addr.value() == peerAddr) {
+      return peer;
+    }
+  }
+  return std::nullopt;
+}
+
+} // namespace
+
 BgpServiceBB::BgpServiceBB(
     PeerManagerBase& peerMgr,
     std::shared_ptr<ConfigManager> configManager,
@@ -366,12 +404,32 @@ folly::coro::Task<BgpConfigChangeResult> BgpServiceBB::co_addPeers(
       "peer_group_name",
   };
 
+  std::vector<thrift::BgpPeer> newPeers;
+  std::vector<folly::IPAddress> identicalPeerAddrs;
   for (const auto& peer : *peers) {
+    if (isExistingIdenticalPeer(peer, kAllowedAddPeerFields, *currentConfig)) {
+      auto peerAddr = folly::IPAddress(*peer.peer_addr());
+      if (!newPeerAddrs.insert(peerAddr).second) {
+        XLOGF(
+            ERR,
+            "addPeers: duplicate peer {} within the request",
+            peerAddr.str());
+        BgpStatsBB::incrAddPeersRejected();
+        co_return BgpConfigChangeResult::INPUT_ERROR;
+      }
+      XLOGF(
+          INFO,
+          "addPeers: peer {} already exists with identical config",
+          peerAddr.str());
+      identicalPeerAddrs.push_back(std::move(peerAddr));
+      continue;
+    }
     if (!validateAddedPeer(
             peer, kAllowedAddPeerFields, *currentConfig, newPeerAddrs)) {
       BgpStatsBB::incrAddPeersRejected();
       co_return BgpConfigChangeResult::INPUT_ERROR;
     }
+    newPeers.push_back(peer);
   }
 
   if (!continueExecution(true)) {
@@ -384,12 +442,18 @@ folly::coro::Task<BgpConfigChangeResult> BgpServiceBB::co_addPeers(
   };
 
   try {
-    XLOGF(INFO, "addPeers validation passed for {} peers", peers->size());
+    XLOGF(
+        INFO,
+        "addPeers validation passed: {} new, {} already configured",
+        newPeers.size(),
+        identicalPeerAddrs.size());
 
-    auto newConfig = configManager_->addPeersToConfig(*peers);
+    auto newConfig = newPeers.empty()
+        ? currentConfig
+        : configManager_->addPeersToConfig(newPeers);
 
     std::vector<std::shared_ptr<BgpPeerConfig>> peerConfigs;
-    for (const auto& peer : *peers) {
+    for (const auto& peer : newPeers) {
       auto peerAddr = folly::IPAddress(*peer.peer_addr());
       peerConfigs.emplace_back(newConfig->getPeerToConfig().at(peerAddr));
     }
@@ -399,6 +463,28 @@ folly::coro::Task<BgpConfigChangeResult> BgpServiceBB::co_addPeers(
       XLOG(ERR, "addPeers: PeerManagerBase::addPeers failed");
       BgpStatsBB::incrAddPeersRejected();
       co_return BgpConfigChangeResult::INTERNAL_ERROR;
+    }
+
+    /*
+     * Config is persisted before sessions are created, so an earlier addPeers
+     * that failed with INTERNAL_ERROR can leave a configured peer with no
+     * session. Re-adding repairs that; PEER_EXISTS_ALREADY means the session
+     * is already there.
+     */
+    for (const auto& peerAddr : identicalPeerAddrs) {
+      auto existingResult = co_await peerMgr_.addPeers(
+          {newConfig->getPeerToConfig().at(peerAddr)});
+      if (existingResult.hasError() &&
+          existingResult.error() !=
+              nettools::bgplib::FiberBgpPeerManager::ErrorCode::
+                  PEER_EXISTS_ALREADY) {
+        XLOGF(
+            ERR,
+            "addPeers: failed to restore session for configured peer {}",
+            peerAddr.str());
+        BgpStatsBB::incrAddPeersRejected();
+        co_return BgpConfigChangeResult::INTERNAL_ERROR;
+      }
     }
 
     BgpStatsBB::incrAddPeersSuccess();
@@ -423,6 +509,23 @@ std::optional<folly::IPAddress> BgpServiceBB::validatePeerAddress(
   }
 
   return folly::IPAddress(addrStr);
+}
+
+bool BgpServiceBB::isExistingIdenticalPeer(
+    const thrift::BgpPeer& peer,
+    const folly::F14FastSet<std::string_view>& allowedFields,
+    const Config& currentConfig) const {
+  if (!getUnsupportedBgpPeerFields(peer, allowedFields).empty()) {
+    return false;
+  }
+  auto peerAddr = folly::IPAddress::tryFromString(*peer.peer_addr());
+  if (!peerAddr.hasValue() ||
+      !currentConfig.getPeerToConfig().count(peerAddr.value())) {
+    return false;
+  }
+  auto configuredPeer = findConfiguredPeer(currentConfig, peerAddr.value());
+  return configuredPeer.has_value() &&
+      isSamePeerConfig(std::move(configuredPeer.value()), peer);
 }
 
 bool BgpServiceBB::validateAddedPeer(
