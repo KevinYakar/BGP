@@ -166,7 +166,8 @@ RibBase::RibBase(
       enableNexthopTracking_(globalConfig.enableNextHopTracking),
       nexthopCache_(nexthopCache),
       fibAgentPort_(fibAgentPort),
-      fibAgentRecvTimeout_(fibAgentRecvTimeout) {
+      fibAgentRecvTimeout_(fibAgentRecvTimeout),
+      enableRibAllocatedPathId_(globalConfig.enableRibAllocatedPathId) {
   // init switchId best effort if deviceName is set in global config
   switchId_ = facebook::bgp::getSwitchId(globalConfig_.deviceName);
   // add monitoring for inter-thread queues

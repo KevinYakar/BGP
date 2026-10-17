@@ -1340,6 +1340,13 @@ class RibBase : public BgpModuleBase, public MonitoredModule {
   uint16_t fibAgentPort_;
   uint32_t fibAgentRecvTimeout_;
 
+  /*
+   * Use the path IDs allocated at multipath selection (pathIdToSend) for
+   * RibOut messages instead of nexthops. See
+   * BgpGlobalConfig::enableRibAllocatedPathId.
+   */
+  const bool enableRibAllocatedPathId_{false};
+
  private:
   uint32_t ribOutQHighWatermark_{kRibOutQueueSizePauseThreshold};
 

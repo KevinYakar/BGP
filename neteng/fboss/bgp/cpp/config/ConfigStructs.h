@@ -175,7 +175,8 @@ struct BgpGlobalConfig {
         enableEgressQueueBackpressure(enableEgressQueueBackpressure),
         enableUpdateGroup(enableUpdateGroup),
         updateGroupConfig(updateGroupConfig),
-        enableRibAllocatedPathId(enableRibAllocatedPathId),
+        /* Update groups require RIB allocated path IDs for add-path. */
+        enableRibAllocatedPathId(enableRibAllocatedPathId || enableUpdateGroup),
         enableOptimizedGR(enableOptimizedGR),
         enablePolicyDefaultAction(enablePolicyDefaultAction),
         enableAddPathGrReconcile(enableAddPathGrReconcile),
@@ -298,7 +299,14 @@ struct BgpGlobalConfig {
    * instead of using cached per-nexthop IDs in AdjRibOut. This also includes
    * constructing RibOut messages based on these path IDs instead of nexthops.
    *
-   * DEPRECATED: unused, retained for config compatibility.
+   * Read once at startup: RIB and every AdjRib must agree on the path ID
+   * scheme, so changing it requires a restart.
+   *
+   * Forced on when enableUpdateGroup is set. Update groups require RIB
+   * allocated path IDs for add-path: an AdjRibOutGroup keys its add-path
+   * entries by the RIB's pathIdToSend, so the peer-level entries a group
+   * member detaches into or collapses from must use the same IDs, not the
+   * per-nexthop IDs from PathIdGenerator.
    */
   const bool enableRibAllocatedPathId{false};
 

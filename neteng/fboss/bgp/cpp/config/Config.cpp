@@ -986,6 +986,7 @@ void Config::populateConfigDatabase(
   UpdateGroupConfig updateGroupConfig;
   /* bgp++ always uses egress queue backpressure. */
   const bool enableEgressQueueBackpressure{true};
+  bool enableRibAllocatedPathId{false};
   bool enableOptimizedGR{false};
   bool enableAddPathGrReconcile{false};
   bool enableLegacyV4NlriEncoding{false};
@@ -1008,6 +1009,9 @@ void Config::populateConfigDatabase(
     }
     if (auto updateGroupFlag = setting->enable_update_group()) {
       enableUpdateGroup = *updateGroupFlag;
+    }
+    if (auto ribAllocatedPathIdFlag = setting->enable_rib_allocated_path_id()) {
+      enableRibAllocatedPathId = *ribAllocatedPathIdFlag;
     }
     if (auto regexes = setting->include_interface_regexes()) {
       includeInterfaceRegexes = *regexes;
@@ -1118,7 +1122,7 @@ void Config::populateConfigDatabase(
       enableEgressQueueBackpressure,
       enableUpdateGroup,
       updateGroupConfig,
-      false /* enableRibAllocatedPathId */,
+      enableRibAllocatedPathId,
       enableOptimizedGR,
       false /* enablePolicyDefaultAction */,
       enableAddPathGrReconcile,
