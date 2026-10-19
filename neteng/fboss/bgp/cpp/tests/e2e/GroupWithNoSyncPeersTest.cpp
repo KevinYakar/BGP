@@ -104,8 +104,7 @@ class GroupWithNoSyncPeersE2ETest : public UpdateGroupPolicyReEvalE2EBase {
       auto spec = allSpecs[i];
       spec.peerGroupName = kReEvalPeerGroupName;
       addPeer(spec);
-      peerIds.push_back(
-          BgpPeerId{spec.peerAddr, spec.peerAddr.asV4().toLongHBO()});
+      peerIds.emplace_back(spec.peerAddr, spec.peerAddr.asV4().toLongHBO());
     }
     setupComponentsWithBgpService(
         queueCapacity, queueHighWm, queueLowWm, /*enableUpdateGroup=*/true);
@@ -149,10 +148,10 @@ class GroupWithNoSyncPeersE2ETest : public UpdateGroupPolicyReEvalE2EBase {
             fmt::format("{}:{}", kBucketCommAsn, i % numAttrBuckets));
       } else {
         if (i % 2 == 1) {
-          communities.push_back(kCommNoAdvt);
+          communities.emplace_back(kCommNoAdvt);
         }
         if (i % 3 == 0) {
-          communities.push_back(kCommModify);
+          communities.emplace_back(kCommModify);
         }
       }
       const auto prefix = fmt::format("36.0.{}.0/24", i);
