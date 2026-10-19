@@ -347,8 +347,8 @@ class UpdateGroupPolicyReEvalE2EBase : public SlowPeerTestBase {
       spec.peerGroupName = reEvalPeerGroupName(groupIdx);
       addPeer(spec);
       peerAddrs.push_back(spec.peerAddr);
-      groups[groupIdx].push_back(
-          BgpPeerId{spec.peerAddr, spec.peerAddr.asV4().toLongHBO()});
+      groups[groupIdx].emplace_back(
+          spec.peerAddr, spec.peerAddr.asV4().toLongHBO());
     }
 
     setupComponentsWithBgpService(
@@ -402,8 +402,7 @@ class UpdateGroupPolicyReEvalE2EBase : public SlowPeerTestBase {
       spec.peerGroupName = kReEvalPeerGroupName;
       addPeer(spec);
       peerAddrs.push_back(spec.peerAddr);
-      peerIds.push_back(
-          BgpPeerId{spec.peerAddr, spec.peerAddr.asV4().toLongHBO()});
+      peerIds.emplace_back(spec.peerAddr, spec.peerAddr.asV4().toLongHBO());
     }
 
     setupComponentsWithBgpService(
@@ -545,10 +544,10 @@ class UpdateGroupPolicyReEvalE2EBase : public SlowPeerTestBase {
     for (int i = 0; i < count; ++i) {
       std::vector<std::string> communities;
       if (i % 2 == 1) {
-        communities.push_back(kCommNoAdvt);
+        communities.emplace_back(kCommNoAdvt);
       }
       if (i % 3 == 0) {
-        communities.push_back(kCommModify);
+        communities.emplace_back(kCommModify);
       }
       const auto prefix = fmt::format("36.0.{}.0/24", i);
       comboToPrefixes[communities].push_back(prefix);
