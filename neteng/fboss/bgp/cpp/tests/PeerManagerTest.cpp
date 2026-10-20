@@ -71,6 +71,8 @@
       ClearRouteFilterStatementUpdatesAdjRibAndKey);                           \
   FRIEND_TEST(PeerManagerTestFixture, ClearGoldenPrefixesPolicyTest);          \
   FRIEND_TEST(PeerManagerTestFixture, SetRouteFilterPolicyVersionCheckTest);   \
+  FRIEND_TEST(                                                                 \
+      PeerManagerTestFixture, IdenticalRouteFilterPolicyPreservesPendingWork); \
   FRIEND_TEST(PeerManagerTestFixture, SetRouteFilterPolicyForceUpdateTest);    \
   FRIEND_TEST(PeerManagerTestFixture, UpdateShadowRibEntryUtil);               \
   FRIEND_TEST(PeerManagerTestFixture, DisableScubaLoggingTest);                \
@@ -199,6 +201,8 @@
       ClearRouteFilterStatementUpdatesAdjRibAndKey);                           \
   FRIEND_TEST(PeerManagerTestFixture, ClearGoldenPrefixesPolicyTest);          \
   FRIEND_TEST(PeerManagerTestFixture, SetRouteFilterPolicyVersionCheckTest);   \
+  FRIEND_TEST(                                                                 \
+      PeerManagerTestFixture, IdenticalRouteFilterPolicyPreservesPendingWork); \
   FRIEND_TEST(PeerManagerTestFixture, DisableScubaLoggingTest);                \
   FRIEND_TEST(PeerManagerTestFixture, NeighborReachabilityMsgNoGrTest);        \
   FRIEND_TEST(PeerManagerTestFixture, NeighborReachabilityMsgWithGrTest);      \
@@ -3255,6 +3259,87 @@ TEST_F(PeerManagerTestFixture, SetRouteFilterPolicyVersionCheckTest) {
   peerMgrThread.join();
   sessionMgrThread.join();
   SUCCEED();
+}
+
+TEST_F(PeerManagerTestFixture, IdenticalRouteFilterPolicyPreservesPendingWork) {
+  auto config = getConfig(
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      kDefaultEorTimeS,
+      false,
+      true /* enable switch level limit */,
+      true /* enable golden prefixes policy */);
+  auto configManager = std::make_shared<ConfigManager>(config);
+  auto peerMgr = std::make_shared<PeerManagerBase>(
+      configManager, nullptr, ribInQ_, ribOutQ_, nbrRouteChangeQ_);
+
+  auto globalConfig = config->getBgpGlobalConfig();
+  auto sessionMgr = std::make_shared<SessionManager>(*globalConfig, false);
+  peerMgr->setSessionManager(sessionMgr);
+
+  auto& evb = peerMgr->getEventBase();
+  auto adjRib = setupAdjRib(
+      evb,
+      peerMgr->getChangeListTracker(),
+      kPeerId1,
+      AsNum(kAsn1),
+      sessionTerminateBaton_,
+      config);
+  adjRib->peeringParams_.description = "adjRib1";
+  adjRib->isSafeModeOn_ = std::make_shared<std::atomic<bool>>(false);
+  adjRib->adjRibOutGroup_ = std::make_shared<AdjRibOutGroup>(evb, "Group1");
+  peerMgr->adjRibs_[kPeerId1] = adjRib;
+
+  auto peerMgrThread = peerMgr->runInThread();
+  auto sessionMgrThread = sessionMgr->runInThread();
+
+  rib_policy::TRouteFilterPolicy tPolicy;
+  tPolicy.statements()->emplace("adjRib1", createTRouteFilterStatement({}));
+  tPolicy.version() = 10;
+
+  auto processingEntered = std::make_shared<folly::coro::Baton>();
+  auto processingRelease = std::make_shared<folly::coro::Baton>();
+  peerMgr->testOnlyDeferPolicyUpdateProcessing(
+      processingEntered, processingRelease);
+
+  evb.runInEventBaseThreadAndWait([&]() {
+    peerMgr->routeFilterPolicy_ = std::make_unique<RouteFilterPolicy>(tPolicy);
+    adjRib->setRouteFilterStatement(
+        peerMgr->routeFilterPolicy_->getStatements().at("adjRib1"));
+
+    // Model reevaluation scheduled by the first CRF write.
+    adjRib->pendingIngressPolicyUpdate_ = true;
+    adjRib->egressPolicyUpdateRequired_ = true;
+    auto* installedPolicy = peerMgr->routeFilterPolicy_.get();
+
+    peerMgr->applyRouteFilterPolicy(
+        std::make_unique<RouteFilterPolicy>(tPolicy),
+        /*forceUpdate=*/false);
+
+    EXPECT_EQ(installedPolicy, peerMgr->routeFilterPolicy_.get());
+    EXPECT_TRUE(adjRib->isPendingIngressPolicyUpdate());
+    EXPECT_TRUE(adjRib->isEgressPolicyUpdateRequired());
+  });
+
+  // An identical update must return before scheduling another coroutine.
+  evb.runInEventBaseThreadAndWait([&]() {
+    EXPECT_EQ(
+        processingEntered, peerMgr->testOnlyPolicyUpdateProcessingEntered_);
+    EXPECT_EQ(
+        processingRelease, peerMgr->testOnlyPolicyUpdateProcessingRelease_);
+    peerMgr->testOnlyPolicyUpdateProcessingEntered_.reset();
+    peerMgr->testOnlyPolicyUpdateProcessingRelease_.reset();
+  });
+
+  peerMgr->markDaemonShutdown();
+  sessionMgr->stop();
+  peerMgr->stop();
+  peerMgrThread.join();
+  sessionMgrThread.join();
 }
 
 /*

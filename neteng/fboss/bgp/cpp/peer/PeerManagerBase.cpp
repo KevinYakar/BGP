@@ -4548,14 +4548,20 @@ void PeerManagerBase::applyRouteFilterPolicy(
     std::unique_ptr<RouteFilterPolicy> policy,
     bool forceUpdate,
     bool applyGoldenPrefixPolicy) noexcept {
-  if (!forceUpdate && routeFilterPolicy_ && policy &&
-      routeFilterPolicy_->getVersion() > policy->getVersion()) {
-    XLOGF(
-        WARNING,
-        "Route filter policy update ignored: version {} < {}",
-        policy->getVersion(),
-        routeFilterPolicy_->getVersion());
-    return;
+  if (!forceUpdate && routeFilterPolicy_ && policy) {
+    if (routeFilterPolicy_->getVersion() > policy->getVersion()) {
+      XLOGF(
+          WARNING,
+          "Route filter policy update ignored: version {} < {}",
+          policy->getVersion(),
+          routeFilterPolicy_->getVersion());
+      return;
+    }
+    if (*routeFilterPolicy_ == *policy) {
+      XLOG_EVERY_MS(INFO, 60000)
+          << "Identical route filter policy update ignored";
+      return;
+    }
   }
 
   routeFilterPolicy_ = std::move(policy);
