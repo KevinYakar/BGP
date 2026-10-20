@@ -357,11 +357,11 @@ class Config {
   uint32_t dynamicPeerLimit_{1000};
 
   /**
-   * Fallback maximum number of stream subscribers, used when the
-   * stream_subscriber_limit feature is enabled but the bgp_setting layer
-   * carries no stream_subscriber_limit value.
+   * Default maximum number of stream subscribers. Replaced only when the
+   * stream_subscriber_limit feature is enabled and the bgp_setting layer
+   * carries a positive stream_subscriber_limit value.
    */
-  uint32_t streamSubscriberLimit_{10};
+  uint32_t streamSubscriberLimit_{2};
 
 #ifdef Config_TEST_FRIENDS
   Config_TEST_FRIENDS

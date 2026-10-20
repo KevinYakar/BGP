@@ -112,6 +112,7 @@
   FRIEND_TEST(StreamSubscriberFixture, NumStreamSubscribersTest);              \
   FRIEND_TEST(StreamSubscriberFixture, ExceedsStreamSubscriberLimitTest);      \
   FRIEND_TEST(StreamSubscriberFixture, ConfiguredStreamSubscriberLimitTest);   \
+  FRIEND_TEST(StreamSubscriberFixture, DefaultStreamSubscriberLimitTest);      \
   FRIEND_TEST(StreamSubscriberFixture, ReconnectAfterDisconnectAtLimitTest);   \
   FRIEND_TEST(StreamSubscriberFixture, ResubscribeAtLimitTest);                \
   FRIEND_TEST(StreamSubscriberFixture, DuplicateAtLimitReportsDuplicateTest);  \
@@ -235,6 +236,7 @@
   friend class StreamSubscriberFixture;                                      \
   FRIEND_TEST(StreamSubscriberFixture, ExceedsStreamSubscriberLimitTest);    \
   FRIEND_TEST(StreamSubscriberFixture, ConfiguredStreamSubscriberLimitTest); \
+  FRIEND_TEST(StreamSubscriberFixture, DefaultStreamSubscriberLimitTest);    \
   FRIEND_TEST(StreamSubscriberFixture, ReconnectAfterDisconnectAtLimitTest); \
   FRIEND_TEST(StreamSubscriberFixture, ResubscribeAtLimitTest);              \
   FRIEND_TEST(StreamSubscriberFixture, DuplicateAtLimitReportsDuplicateTest);
@@ -5559,6 +5561,45 @@ TEST_F(StreamSubscriberFixture, ConfiguredStreamSubscriberLimitTest) {
   const auto overLimit = std::make_unique<std::string>("subOverLimit");
   EXPECT_THROW(peerMgr->subscribe(overLimit), TBgpServiceException);
   EXPECT_EQ(kLimit, peerMgr->numStreamSubscribers());
+  EXPECT_FALSE(peerMgr->streamSubscribers_.contains(*overLimit));
+}
+
+/**
+ * @brief With the stream_subscriber_limit feature off, the device still
+ * enforces the default limit instead of admitting every subscriber.
+ *
+ * @details Test steps:
+ * 1. Set up through the real config path with the feature off and no value.
+ * 2. Assert the resolved limit is set.
+ * 3. Subscribe up to that limit; each is admitted.
+ * 4. Assert the next subscription is rejected.
+ */
+TEST_F(StreamSubscriberFixture, DefaultStreamSubscriberLimitTest) {
+  SetUp(
+      true /* configureMonitorPeer */,
+      true /* initialAnnouncementDone */,
+      false /* enableSubscriberLimit */);
+
+  const auto limit =
+      config_->getBgpGlobalConfig()->streamSubscriberLimit.value_or(0);
+  ASSERT_GT(limit, 0);
+  EXPECT_FALSE(peerMgr->exceedsStreamSubscriberLimit());
+
+  /*
+   * The streams must outlive the loop. A destroyed stream ends its session,
+   * which frees the slot and would let the over-limit subscription through.
+   */
+  std::vector<apache::thrift::ServerStream<TBgpRouteDelta>> streams;
+  for (uint32_t i = 0; i < limit; ++i) {
+    const auto name = std::make_unique<std::string>(fmt::format("sub{}", i));
+    streams.emplace_back(peerMgr->subscribe(name));
+  }
+  EXPECT_EQ(limit, peerMgr->numStreamSubscribers());
+  EXPECT_TRUE(peerMgr->exceedsStreamSubscriberLimit());
+
+  const auto overLimit = std::make_unique<std::string>("subOverLimit");
+  EXPECT_THROW(peerMgr->subscribe(overLimit), TBgpServiceException);
+  EXPECT_EQ(limit, peerMgr->numStreamSubscribers());
   EXPECT_FALSE(peerMgr->streamSubscribers_.contains(*overLimit));
 }
 
