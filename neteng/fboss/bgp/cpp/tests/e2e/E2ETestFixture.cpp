@@ -241,9 +241,8 @@ void E2ETestFixture::deletePeer(const folly::IPAddress& peerAddr) {
 folly::Expected<folly::Unit, nettools::bgplib::FiberBgpPeerManager::ErrorCode>
 E2ETestFixture::delPeerAtRuntime(const folly::IPAddress& peerAddr) {
   XLOGF(INFO, "=== delPeerAtRuntime: peer {} ===", peerAddr.str());
-  return folly::coro::blockingWait(
-      peerManager_->delPeers({peerAddr})
-          .scheduleOn(&peerManager_->getEventBase()));
+  return folly::coro::blockingWait(co_withExecutor(
+      &peerManager_->getEventBase(), peerManager_->delPeers({peerAddr})));
 }
 
 void E2ETestFixture::bringUpPeer(

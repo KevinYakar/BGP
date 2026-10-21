@@ -9030,9 +9030,10 @@ TEST_F(AdjRibInboundFixture, StopBlocksUntilPendingPushCompletes) {
      * collectAllRange waiting for our promise.
      */
     auto stopFuture =
-        folly::coro::co_invoke(
-            [this]() -> folly::coro::Task<void> { co_await adjRib_->stop(); })
-            .scheduleOn(&evb_)
+        co_withExecutor(
+            &evb_, folly::coro::co_invoke([this]() -> folly::coro::Task<void> {
+              co_await adjRib_->stop();
+            }))
             .start();
 
     /*
