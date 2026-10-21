@@ -1307,85 +1307,71 @@ void RibBase::processRibInNexthopUpdate(
     const auto& nexthopIp = nexthopStatus.getNexthop();
     XLOGF(DBG2, "Processing nexthop update for {}", nexthopIp.str());
 
-    bool isReachable = nexthopStatus.isReachable();
-    std::optional<uint32_t> igpCost = nexthopStatus.getIgpCost();
+    const bool isReachable = nexthopStatus.isReachable();
+    const std::optional<uint32_t> igpCost = nexthopStatus.getIgpCost();
+    const bool isResolved = nexthopStatus.isResolvedForSelection();
 
     // Check if the nexthop exists in nexthopInfoMap_
     auto it = nexthopInfoMap_.find(nexthopIp);
     if (it != nexthopInfoMap_.end()) {
       // Update the existing NexthopInfo
-      bool reachabilityChanged = (it->second.isReachable() != isReachable);
-      bool costChanged = (it->second.getIgpCost() != igpCost);
+      const bool isReachabilityChanged =
+          it->second.isReachable() != isReachable;
+      const bool isIgpCostChanged = it->second.getIgpCost() != igpCost;
+      const bool isResolvabilityChanged =
+          it->second.isResolvedForSelection() != isResolved;
+      const bool needsPathSelection =
+          isIgpCostChanged || isResolvabilityChanged;
 
-      /*
-       * Update the unresolvable-nexthop counter on reachability change. The
-       * inactive-path count is deliberately NOT adjusted here: the paths this
-       * flip affects are all marked for re-selection below, and
-       * prePathSelectionFiltering recomputes their count from the RIB. Deriving
-       * it from getRouteInfoListSize() instead would reintroduce the drift this
-       * counter used to have -- that size is maintained by hand and misses the
-       * displaced RouteInfo on the re-advertisement path.
-       */
-      if (reachabilityChanged) {
-        if (isReachable) {
-          ribCounters_.onUnresolvableNexthopRemoved();
+      if (isResolvabilityChanged) {
+        if (isResolved) {
+          ribCounters_.decrementUnresolvableNexthopCount();
         } else {
-          ribCounters_.onUnresolvableNexthopAdded();
+          ribCounters_.incrementUnresolvableNexthopCount();
         }
       }
 
-      if (reachabilityChanged || costChanged) {
+      if (isReachabilityChanged || isIgpCostChanged || isResolvabilityChanged) {
         XLOGF(
             DBG1,
-            "Updating nexthop {} status: reachable={} -> {}, igpCost={} -> {}",
+            "Updating nexthop {} status: reachable={} -> {}, igpCost={} -> {}, resolvedForSelection={} -> {}",
             nexthopIp.str(),
             it->second.isReachable(),
             isReachable,
             it->second.getIgpCost().has_value()
                 ? std::to_string(it->second.getIgpCost().value())
                 : "unset",
-            igpCost.has_value() ? std::to_string(igpCost.value()) : "unset");
+            igpCost.has_value() ? std::to_string(igpCost.value()) : "unset",
+            it->second.isResolvedForSelection(),
+            isResolved);
+      }
 
-        /*
-         * Record this changed nexthop so the trigger log below names which
-         * nexthop(s) moved. See T274256815.
-         */
-        triggeringNexthops.push_back(nexthopIp.str());
+      // Update the existing nexthopInfo with the status
+      it->second.updateStatus(nexthopStatus);
 
-        // Update the existing nexthopInfo with the status
-        it->second.updateStatus(nexthopStatus);
+      /*
+       * The initial full sync consumes status stored before EOR. Afterwards,
+       * only cost or selection eligibility changes require path selection.
+       */
+      if (!needsPathSelection || !ribEoRReceived_) {
+        continue;
+      }
 
-        /**
-         * The loop must be entered even if RIB EOR is not received because this
-         * path needs to be registered with nexthopCache to receive further
-         * updates from FibAgent when nexthopInfo changes.
-         *
-         * If the iteration is skipped, these paths won't be registered with
-         * nexthopCache unless they're re-advertised somehow.
-         *
-         * At the end of this method, the fib programming timer is scheduled to
-         * redo path selection. So if execution continues here, the path is
-         * registered to nexthopCache and the fib programming timer is NOT
-         * scheduled if RIB EOR is not received.
-         */
-        if (!ribEoRReceived_) {
-          continue;
-        }
+      triggeringNexthops.push_back(nexthopIp.str());
 
-        /*
-         * Iterate over RouteInfo in the association list to mark
-         * requirePathSelection only if
-         * ribEoRReceived: True => already fulfilled the initial FULL_SYNC
-         */
-        for (auto routeInfoIt = it->second.begin();
-             routeInfoIt != it->second.end();
-             routeInfoIt++) {
-          // Get the ribEntry directly from the RouteInfo
-          RibEntry& ribEntry = routeInfoIt->getRibEntry();
-          ribEntry.requirePathSelection();
-          if (!needPathSelection) {
-            needPathSelection = true;
-          }
+      /*
+       * Iterate over RouteInfo in the association list to mark
+       * requirePathSelection only if
+       * ribEoRReceived: True => already fulfilled the initial FULL_SYNC
+       */
+      for (auto routeInfoIt = it->second.begin();
+           routeInfoIt != it->second.end();
+           routeInfoIt++) {
+        // Get the ribEntry directly from the RouteInfo
+        RibEntry& ribEntry = routeInfoIt->getRibEntry();
+        ribEntry.requirePathSelection();
+        if (!needPathSelection) {
+          needPathSelection = true;
         }
       }
     } else {
@@ -1415,8 +1401,8 @@ void RibBase::processRibInNexthopUpdate(
   }
 
   /*
-   * Reachability just changed: if the initial path computation was deferred
-   * waiting on nexthop resolution, run it now that this may have completed.
+   * If initial path computation was waiting on nexthop resolution, check
+   * whether the new status completed it.
    */
   maybeRunPendingInitialPathComputation();
 }
@@ -2979,7 +2965,11 @@ RibBase::createTRibEntryWithFilter(
         tPath.next_hop_weight() = it->second;
       }
     }
-    if (routeinfo->isNextHopReachable()) {
+    /*
+     * Reachability and cost presence are independent. Serialize igp_cost only
+     * when supplied; local routes get the maximum value.
+     */
+    if (routeinfo->getIsRouteLocal() || routeinfo->hasIgpCost()) {
       tPath.igp_cost() = routeinfo->getIgpCostValue();
     }
     tPath.bestpath_filter_descr() = routeinfo->getBestPathFilterDescr();
@@ -3482,9 +3472,9 @@ NexthopInfo* FOLLY_NULLABLE RibBase::getNexthopInfo(
         nexthopInfoMap_.emplace(nexthop, NexthopInfo(nextHopStatus));
     if (inserted) {
       RibStats::incrNexthopInfoCount();
-    }
-    if (!isReachable) {
-      ribCounters_.onUnresolvableNexthopAdded();
+      if (!nextHopStatus.isResolvedForSelection()) {
+        ribCounters_.incrementUnresolvableNexthopCount();
+      }
     }
 
     XLOGF(
@@ -3583,9 +3573,8 @@ bool RibBase::checkAndDeleteNexthopInfo(const folly::IPAddress& nexthop) {
       DBG2, "Deleting nexthop status for {} from nexthopCache", nexthop.str());
   nexthopCache_->unregisterAndRemoveNexthopStatus(nexthop);
 
-  // Update unresolvable nexthop counter before deletion
-  if (!nexthopInfo.isReachable()) {
-    ribCounters_.onUnresolvableNexthopRemoved();
+  if (!nexthopInfo.isResolvedForSelection()) {
+    ribCounters_.decrementUnresolvableNexthopCount();
   }
 
   // Delete from nexthopInfoMap_
@@ -3619,7 +3608,8 @@ TNexthopInfo toTNexthopInfo(
 
   /*
    * Report change times as an age (seconds ago), computed here on the RIB
-   * thread that owns the timestamps. Unset => never resolved.
+   * thread that owns the timestamps. Reachability age starts when the source
+   * first reports reachable; cost age starts when a cost is received.
    */
   const auto now = std::chrono::steady_clock::now();
   if (const auto ts = nexthopInfo.getLastReachabilityChangeTs()) {

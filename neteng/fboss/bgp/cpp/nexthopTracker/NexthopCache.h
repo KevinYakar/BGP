@@ -137,12 +137,12 @@ class NexthopCache {
       const folly::IPAddress& nexthopIp);
 
   /**
-   * @brief Registers a hook invoked whenever a nexthop is registered from the
-   *        RIB and its current status is not reachable.
+   * @brief Registers a hook invoked when a nexthop is registered from the RIB
+   *        and its source reports it as unreachable or without an IGP cost.
    *
    * NetlinkWrapper uses this to drive the pull resolution path: when the RIB
-   * registers interest in a nexthop that has no answer yet, the hook lets
-   * NetlinkWrapper evaluate it against interface link state.
+   * registers interest in such a nexthop, the hook lets NetlinkWrapper check
+   * interface link state and supply any missing status.
    *
    * The hook is invoked on the RIB thread, OUTSIDE the cache lock, and must be
    * non-blocking. It is set once at startup (only when the interface-state
@@ -172,9 +172,10 @@ class NexthopCache {
 
   /*
    * Hook fired (outside the map lock) from registerAndGetNexthopStatus when a
-   * registered nexthop has no reachable answer yet. Set once at startup before
-   * any thread registers nexthops (see setOnNexthopRegistered), so it needs no
-   * synchronization. Empty unless the interface-state resolution flag is on.
+   * registered nexthop is unreachable or has no IGP cost. Set once at startup
+   * before any thread registers nexthops (see setOnNexthopRegistered), so it
+   * needs no synchronization. Empty unless the interface-state resolution
+   * flag is on.
    */
   std::function<void(folly::IPAddress)> onNexthopRegistered_;
 

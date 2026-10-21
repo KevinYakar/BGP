@@ -98,16 +98,15 @@ class NexthopStatus {
   }
 
   /**
-   * @brief Check if the nexthop is reachable
-   * @return true if the nexthop is reachable, false otherwise
+   * @brief Check whether the source reports the nexthop as reachable.
    */
   bool isReachable() const {
-    return igpCost_.has_value();
+    return isReachable_;
   }
 
   /**
    * @brief Get the IGP cost to reach the nexthop
-   * @return Optional IGP cost, nullopt if the nexthop is unreachable
+   * @return Optional IGP cost, or nullopt if the source supplied no cost.
    */
   std::optional<uint32_t> getIgpCost() const {
     return igpCost_;
@@ -142,12 +141,8 @@ class NexthopStatus {
    * @brief Whether this nexthop is resolved for the purpose of best-path
    * selection.
    *
-   * A nexthop is resolved when it is reachable AND either it has an IGP cost or
-   * the excludeNexthopWithoutCost policy is disabled. This is intentionally
-   * distinct from isReachable(): a reachable nexthop with no IGP cost is still
-   * reported as unreachable by isReachable() (and hence to ODS/CLI exactly as
-   * the cost-not-set case), but may remain eligible for selection under FBOSS
-   * semantics (excludeNexthopWithoutCost = false).
+   * A nexthop is resolved when its source reports it as reachable and either
+   * supplies an IGP cost or allows selection without a cost.
    *
    * @return true if the nexthop is eligible for best-path selection
    */
@@ -161,9 +156,7 @@ class NexthopStatus {
   folly::IPAddress nexthop_;
 
   /*
-   * Whether the nexthop is reachable as reported by the nexthop source,
-   * independent of whether an IGP cost is known. Used only by
-   * isResolvedForSelection(); isReachable() remains cost-derived.
+   * Whether the nexthop source reports the nexthop as reachable.
    */
   bool isReachable_{false};
 

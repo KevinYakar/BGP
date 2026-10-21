@@ -105,7 +105,11 @@ std::vector<CanonicalPathInput> RibDC::buildCanonicalPathInputs(
       }
     }
     /* Per-instance operational fields, mirror createTRibEntryWithFilter */
-    if (routeinfo.isNextHopReachable()) {
+    /*
+     * Reachability and cost presence are independent. Serialize igpCost only
+     * when supplied; local routes get the maximum value.
+     */
+    if (routeinfo.getIsRouteLocal() || routeinfo.hasIgpCost()) {
       input.igpCost = routeinfo.getIgpCostValue();
     }
     input.bestPathFilterDescr = routeinfo.getBestPathFilterDescr();

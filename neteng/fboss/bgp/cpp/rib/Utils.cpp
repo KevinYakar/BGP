@@ -128,7 +128,11 @@ TBgpPath toTBgpPath(
       tPath.next_hop_weight() = it->second;
     }
   }
-  if (routeinfo->isNextHopReachable()) {
+  /*
+   * Local routes do not need nexthop resolution, so they have no IGP cost.
+   * They are serialized with the maximum possible IGP cost.
+   */
+  if (routeinfo->getIsRouteLocal() || routeinfo->hasIgpCost()) {
     tPath.igp_cost() = routeinfo->getIgpCostValue();
   }
   tPath.bestpath_filter_descr() = routeinfo->getBestPathFilterDescr();

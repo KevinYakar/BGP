@@ -19,7 +19,7 @@
   FRIEND_TEST(RibEntryTest, UpdatePathPreservesPathIdToSend);      \
   FRIEND_TEST(RibEntryTest, SelectBestPathPreservesPathIdsToSend); \
   FRIEND_TEST(RibEntryTest, SelectBestPathAssignsPathIdsToSend);   \
-  FRIEND_TEST(RibEntryTest, IsNextHopReachableTest);
+  FRIEND_TEST(RibEntryTest, HasIgpCostTest);
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -1609,12 +1609,8 @@ TEST(RibEntryTest, SelectBestPathPreservesPathIdsToSend) {
   EXPECT_EQ(ribEntry.routeInfos_[peer2Id][kDefaultPathID]->pathIdToSend, 5);
 }
 
-/*
- * Test that local routes are always considered reachable, regardless of
- * nexthop info. Non-local routes require a valid nexthop to be considered
- * reachable.
- */
-TEST(RibEntryTest, IsNextHopReachableTest) {
+/* Test whether a route has an IGP cost. */
+TEST(RibEntryTest, HasIgpCostTest) {
   auto attrs = std::make_shared<facebook::bgp::BgpPath>(
       *buildBgpPathFields(4, 4, 4, 4, 0, kV4Nexthop1));
   attrs->publish();
@@ -1632,9 +1628,11 @@ TEST(RibEntryTest, IsNextHopReachableTest) {
   nettools::bgplib::BgpPeerId localPeerId{localPeer.addr, localPeer.routerId};
   auto localRouteInfo = ribEntry.routeInfos_[localPeerId][kDefaultPathID];
 
-  // Local routes should be reachable even without nexthop info set
+  // Local routes without nexthop information have no IGP cost.
   EXPECT_TRUE(localRouteInfo->getIsRouteLocal());
-  EXPECT_TRUE(localRouteInfo->isNextHopReachable());
+  EXPECT_TRUE(localRouteInfo->isNexthopReachable());
+  EXPECT_FALSE(localRouteInfo->hasIgpCost());
+  EXPECT_TRUE(localRouteInfo->isResolvedForSelection());
 
   // Create a non-local route (EBGP)
   RibEntry ribEntry2(kV4Prefix2);
@@ -1644,12 +1642,10 @@ TEST(RibEntryTest, IsNextHopReachableTest) {
   nettools::bgplib::BgpPeerId ebgpPeerId{ebgpPeer.addr, ebgpPeer.routerId};
   auto ebgpRouteInfo = ribEntry2.routeInfos_[ebgpPeerId][kDefaultPathID];
 
-  /*
-   * Non-local route without nexthop info should not be reachable
-   * (getIgpCostValue returns max when nexthopInfo_ is nullptr)
-   */
+  // A non-local route also needs linked nexthop information for a cost.
   EXPECT_FALSE(ebgpRouteInfo->getIsRouteLocal());
-  EXPECT_FALSE(ebgpRouteInfo->isNextHopReachable());
+  EXPECT_FALSE(ebgpRouteInfo->isNexthopReachable());
+  EXPECT_FALSE(ebgpRouteInfo->hasIgpCost());
 
   // Set up a reachable nexthop for the non-local route
   NexthopInfo reachableNexthopInfo(NexthopStatus(
@@ -1657,7 +1653,15 @@ TEST(RibEntryTest, IsNextHopReachableTest) {
       true, // isReachable
       100)); // igpCost
   ebgpRouteInfo->setNexthopInfo(&reachableNexthopInfo);
-  EXPECT_TRUE(ebgpRouteInfo->isNextHopReachable());
+  EXPECT_TRUE(ebgpRouteInfo->isNexthopReachable());
+  EXPECT_TRUE(ebgpRouteInfo->hasIgpCost());
+
+  // Source reachability alone does not provide an IGP cost.
+  NexthopInfo reachableWithoutCost(
+      NexthopStatus(kV4Nexthop1, true, std::nullopt));
+  ebgpRouteInfo->setNexthopInfo(&reachableWithoutCost);
+  EXPECT_TRUE(ebgpRouteInfo->isNexthopReachable());
+  EXPECT_FALSE(ebgpRouteInfo->hasIgpCost());
 
   // Set up an unreachable nexthop (no IGP cost)
   NexthopInfo unreachableNexthopInfo(NexthopStatus(
@@ -1665,7 +1669,8 @@ TEST(RibEntryTest, IsNextHopReachableTest) {
       false, // isReachable
       std::nullopt)); // igpCost
   ebgpRouteInfo->setNexthopInfo(&unreachableNexthopInfo);
-  EXPECT_FALSE(ebgpRouteInfo->isNextHopReachable());
+  EXPECT_FALSE(ebgpRouteInfo->isNexthopReachable());
+  EXPECT_FALSE(ebgpRouteInfo->hasIgpCost());
 
   // Clean up the pointer before NexthopInfo goes out of scope
   ebgpRouteInfo->setNexthopInfo(nullptr);

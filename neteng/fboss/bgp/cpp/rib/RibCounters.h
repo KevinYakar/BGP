@@ -140,14 +140,12 @@ class RibCounters {
     RibStats::setOriginatedRoutesSize(count);
   }
 
-  /** A tracked nexthop became unresolvable. */
-  void onUnresolvableNexthopAdded() {
+  void incrementUnresolvableNexthopCount() {
     ++unresolvableNexthops_;
     RibStats::incrUnresolvableNexthopsCount();
   }
 
-  /** A previously-unresolvable nexthop became resolvable (or was removed). */
-  void onUnresolvableNexthopRemoved() {
+  void decrementUnresolvableNexthopCount() {
     --unresolvableNexthops_;
     RibStats::decrUnresolvableNexthopsCount();
   }

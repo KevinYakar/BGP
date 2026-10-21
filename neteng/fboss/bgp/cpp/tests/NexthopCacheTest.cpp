@@ -235,6 +235,48 @@ TEST_F(NexthopCacheTestFixture, AddOrUpdateNexthopStatus) {
   EXPECT_THAT(update.nexthopStatuses[0].isConnected(), Eq(false));
 }
 
+TEST_F(NexthopCacheTestFixture, ReachableWithoutCostUpdatesCacheAndRib) {
+  const folly::IPAddress nexthopIp("2620:0:1cff:dead:bef1:ffff:ffff:101");
+  cache_->registerAndGetNexthopStatus(nexthopIp);
+
+  const NexthopStatus ebbStatus(
+      nexthopIp,
+      /*isReachable=*/true,
+      /*igpCost=*/std::nullopt,
+      /*isConnected=*/std::nullopt,
+      /*excludeNexthopWithoutCost=*/true);
+  auto updates = cache_->addOrUpdateNextHopStatus({ebbStatus});
+  ASSERT_EQ(updates.size(), 1);
+  EXPECT_TRUE(updates[0].isReachable());
+  EXPECT_FALSE(updates[0].isResolvedForSelection());
+
+  EXPECT_TRUE(cache_->addOrUpdateNextHopStatus({ebbStatus}).empty());
+
+  const NexthopStatus fbossStatus(
+      nexthopIp,
+      /*isReachable=*/true,
+      /*igpCost=*/std::nullopt,
+      /*isConnected=*/std::nullopt,
+      /*excludeNexthopWithoutCost=*/false);
+  updates = cache_->addOrUpdateNextHopStatus({fbossStatus});
+  ASSERT_EQ(updates.size(), 1);
+  EXPECT_TRUE(updates[0].isResolvedForSelection());
+}
+
+TEST_F(NexthopCacheTestFixture, RetainsReachableStatusWithoutCost) {
+  const folly::IPAddress nexthopIp("2620:0:1cff:dead:bef1:ffff:ffff:102");
+  cache_->addOrUpdateNextHopStatus(
+      {NexthopStatus(nexthopIp, true, std::nullopt)});
+  cache_->registerAndGetNexthopStatus(nexthopIp);
+
+  EXPECT_FALSE(cache_->unregisterAndRemoveNexthopStatus(nexthopIp));
+  EXPECT_FALSE(cache_->isRegistered(nexthopIp));
+
+  const auto status = cache_->registerAndGetNexthopStatus(nexthopIp);
+  EXPECT_TRUE(status.isReachable());
+  EXPECT_FALSE(status.getIgpCost().has_value());
+}
+
 TEST_F(NexthopCacheTestFixture, AddOrUpdateMultipleNexthopsWithMap) {
   // Create multiple nexthop IPs and their statuses
   folly::IPAddress nexthopIp1("2620:0:1cff:dead:bef1:ffff:ffff:99");
@@ -420,9 +462,9 @@ TEST_F(NexthopCacheTestFixture, NhtCacheReachabilityCounters) {
       {NexthopStatus(nexthopIp, /*isReachable=*/false)});
   cache_->registerAndGetNexthopStatus(nexthopIp);
 
-  // Transition: unreachable -> reachable
+  // Source transition: unreachable -> reachable without a cost.
   cache_->addOrUpdateNextHopStatus(
-      {NexthopStatus(nexthopIp, /*isReachable=*/true, 10)});
+      {NexthopStatus(nexthopIp, /*isReachable=*/true)});
   tcData->publishStats();
 
   EXPECT_EQ(
@@ -430,7 +472,7 @@ TEST_F(NexthopCacheTestFixture, NhtCacheReachabilityCounters) {
   EXPECT_EQ(
       0, tcData->getCounter(RibStats::kNhtCacheNexthopUnreachable + ".count"));
 
-  // Transition: reachable -> unreachable
+  // The reverse source transition is also counted without a cost.
   cache_->addOrUpdateNextHopStatus(
       {NexthopStatus(nexthopIp, /*isReachable=*/false)});
   tcData->publishStats();
@@ -439,6 +481,35 @@ TEST_F(NexthopCacheTestFixture, NhtCacheReachabilityCounters) {
       1, tcData->getCounter(RibStats::kNhtCacheNexthopReachable + ".count"));
   EXPECT_EQ(
       1, tcData->getCounter(RibStats::kNhtCacheNexthopUnreachable + ".count"));
+
+  cache_->addOrUpdateNextHopStatus(
+      {NexthopStatus(nexthopIp, /*isReachable=*/true)});
+  tcData->publishStats();
+
+  EXPECT_EQ(
+      2, tcData->getCounter(RibStats::kNhtCacheNexthopReachable + ".count"));
+  EXPECT_EQ(
+      1, tcData->getCounter(RibStats::kNhtCacheNexthopUnreachable + ".count"));
+
+  // Adding a cost does not change source reachability.
+  cache_->addOrUpdateNextHopStatus(
+      {NexthopStatus(nexthopIp, /*isReachable=*/true, 10)});
+  tcData->publishStats();
+
+  EXPECT_EQ(
+      2, tcData->getCounter(RibStats::kNhtCacheNexthopReachable + ".count"));
+  EXPECT_EQ(
+      1, tcData->getCounter(RibStats::kNhtCacheNexthopUnreachable + ".count"));
+
+  // Transition: reachable -> unreachable
+  cache_->addOrUpdateNextHopStatus(
+      {NexthopStatus(nexthopIp, /*isReachable=*/false)});
+  tcData->publishStats();
+
+  EXPECT_EQ(
+      2, tcData->getCounter(RibStats::kNhtCacheNexthopReachable + ".count"));
+  EXPECT_EQ(
+      2, tcData->getCounter(RibStats::kNhtCacheNexthopUnreachable + ".count"));
 
   // No-op: unreachable -> unreachable (no counter bump)
   cache_->addOrUpdateNextHopStatus(
@@ -446,9 +517,9 @@ TEST_F(NexthopCacheTestFixture, NhtCacheReachabilityCounters) {
   tcData->publishStats();
 
   EXPECT_EQ(
-      1, tcData->getCounter(RibStats::kNhtCacheNexthopReachable + ".count"));
+      2, tcData->getCounter(RibStats::kNhtCacheNexthopReachable + ".count"));
   EXPECT_EQ(
-      1, tcData->getCounter(RibStats::kNhtCacheNexthopUnreachable + ".count"));
+      2, tcData->getCounter(RibStats::kNhtCacheNexthopUnreachable + ".count"));
 }
 
 /*
@@ -563,12 +634,32 @@ TEST_F(NexthopCacheTestFixture, OnNexthopRegisteredHook) {
   cache_->registerAndGetNexthopStatus(reachableIp);
   EXPECT_EQ(fired.size(), 1);
 
+  // EBB still needs a cost, so registration requests resolution.
+  folly::IPAddress ebbNoCostIp("10.0.0.3");
+  cache_->addOrUpdateNextHopStatus(
+      {NexthopStatus(ebbNoCostIp, true, std::nullopt)});
+  cache_->registerAndGetNexthopStatus(ebbNoCostIp);
+  ASSERT_EQ(fired.size(), 2);
+  EXPECT_EQ(fired[1], ebbNoCostIp);
+
+  // FBOSS allows selection without a cost, but still requests the metric.
+  folly::IPAddress fbossNoCostIp("10.0.0.4");
+  cache_->addOrUpdateNextHopStatus({NexthopStatus(
+      fbossNoCostIp,
+      true,
+      std::nullopt,
+      std::nullopt,
+      /*excludeNexthopWithoutCost=*/false)});
+  cache_->registerAndGetNexthopStatus(fbossNoCostIp);
+  ASSERT_EQ(fired.size(), 3);
+  EXPECT_EQ(fired[2], fbossNoCostIp);
+
   // Registering an existing-but-unreachable nexthop fires the hook.
-  folly::IPAddress unreachableIp("10.0.0.3");
+  folly::IPAddress unreachableIp("10.0.0.5");
   cache_->addOrUpdateNextHopStatus({NexthopStatus(unreachableIp, false)});
   cache_->registerAndGetNexthopStatus(unreachableIp);
-  ASSERT_EQ(fired.size(), 2);
-  EXPECT_EQ(fired[1], unreachableIp);
+  ASSERT_EQ(fired.size(), 4);
+  EXPECT_EQ(fired[3], unreachableIp);
 }
 
 } // namespace facebook::bgp

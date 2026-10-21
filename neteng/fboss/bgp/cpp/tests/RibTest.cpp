@@ -20,6 +20,7 @@
 #define RibBase_TEST_FRIENDS                                                   \
   FRIEND_TEST(RibFixture, EorSentInitializationEvent);                         \
   FRIEND_TEST(RibFixture, GetRibEntries);                                      \
+  FRIEND_TEST(RibFixture, LocalRouteIgpCostSerialization);                     \
   FRIEND_TEST(RibFixture, GetRibEntriesCanonical);                             \
   FRIEND_TEST(RibFixture, GetRibPrefixCanonical);                              \
   FRIEND_TEST(RibFixture, GetRibEntriesForCommunitiesCanonical);               \
@@ -83,6 +84,10 @@
       RibInAnnouncementRequestsNexthopSubscription);                           \
   FRIEND_TEST(RibNexthopTrackingFixture, RibInNexthopUpdate);                  \
   FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture, ReachabilityAndResolutionAreIndependent);     \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect); \
+  FRIEND_TEST(                                                                 \
       RibNexthopTrackingFixture,                                               \
       StaleQueuedNexthopUpdateDoesNotRecreateUntrackedState);                  \
   FRIEND_TEST(RibNexthopTrackingFixture, RouteInfoStoresRibEntryPointer);      \
@@ -125,6 +130,7 @@
 #include <boost/algorithm/string.hpp>
 #include <algorithm>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -5412,6 +5418,36 @@ TEST_F(RibFixture, GetRibEntries) {
   }
 }
 
+TEST_F(RibFixture, LocalRouteIgpCostSerialization) {
+  auto attrs =
+      std::make_shared<facebook::bgp::BgpPath>(*buildBgpPathFields(4, 4, 4, 4));
+  attrs->publish();
+
+  RibEntry entry(kV4Prefix1);
+  entry.updatePath(kV4LocalPeerInfo, attrs, false);
+  RibBase::selectBestPath(entry, multipathSelector, bestpathSelector, false, 0);
+  rib_->ribEntries_.emplace(kV4Prefix1, std::move(entry));
+
+  const auto expectedIgpCost =
+      static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+  const auto legacy = rib_->getRibEntries(TBgpAfi::AFI_IPV4);
+  ASSERT_EQ(legacy.size(), 1);
+  const auto& legacyPaths = legacy[0].paths()->at(kBestPathGroup);
+  ASSERT_EQ(legacyPaths.size(), 1);
+  ASSERT_TRUE(legacyPaths[0].igp_cost().has_value());
+  EXPECT_EQ(*legacyPaths[0].igp_cost(), expectedIgpCost);
+
+  const auto canonical = rib_->getRibEntriesCanonical(TBgpAfi::AFI_IPV4);
+  ASSERT_EQ(canonical.rib_entries()->size(), 1);
+  const auto& canonicalEntry = canonical.rib_entries()->at(
+      folly::IPAddress::networkToString(kV4Prefix1));
+  const auto& canonicalPaths =
+      canonicalEntry.paths()->at(std::string(kBestPathGroup));
+  ASSERT_EQ(canonicalPaths.size(), 1);
+  ASSERT_TRUE(canonicalPaths[0].igp_cost().has_value());
+  EXPECT_EQ(*canonicalPaths[0].igp_cost(), expectedIgpCost);
+}
+
 /*
  * getRibEntriesCanonical returns the same logical RIB state as getRibEntries,
  * but in deduplicated form: paths are interned by address, peers by (addr,
@@ -8168,6 +8204,11 @@ TEST_F(RibFixture, PathsAreUpdatedByPathId) {
   EXPECT_EQ(0, entry1.getAllPaths().size());
 }
 
+namespace {
+void setNexthopTrackingFeatureFlag(bool enabled);
+int64_t inactivePathCount();
+} // namespace
+
 TEST_F(RibNexthopTrackingFixture, RibInAnnouncementWithNexthopTracking) {
   auto tcData = fb303::ThreadCachedServiceData::get();
   RibStats::initCounters();
@@ -8410,6 +8451,204 @@ TEST_F(RibNexthopTrackingFixture, RibInNexthopUpdate) {
   fibFuture2.wait();
 
   // After update: kPeerAddr1 is now reachable, counter should be 0
+  tcData->publishStats();
+  EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+}
+
+TEST_F(RibNexthopTrackingFixture, ReachabilityAndResolutionAreIndependent) {
+  RibStats::initCounters();
+  setNexthopTrackingFeatureFlag(true);
+  rib_->setFibBatchTime(milliseconds(2));
+
+  const NexthopStatus dcStatus(
+      kPeerAddr1,
+      /*isReachable=*/true,
+      /*igpCost=*/std::nullopt,
+      /*isConnected=*/std::nullopt,
+      /*excludeNexthopWithoutCost=*/false);
+  const NexthopStatus bbStatus(
+      kPeerAddr2,
+      /*isReachable=*/true,
+      /*igpCost=*/std::nullopt,
+      /*isConnected=*/std::nullopt,
+      /*excludeNexthopWithoutCost=*/true);
+  updateCacheAndNotifyRib({dcStatus, bbStatus});
+
+  const auto attrs = *buildBgpPathFields(4, 4, 4, 4);
+  auto dcAttrs = std::make_shared<facebook::bgp::BgpPath>(attrs);
+  dcAttrs->setNexthop(kPeerAddr1);
+  dcAttrs->publish();
+  auto bbAttrs = std::make_shared<facebook::bgp::BgpPath>(attrs);
+  bbAttrs->setNexthop(kPeerAddr2);
+  bbAttrs->publish();
+
+  auto fibFuture = fib_->getFibProgramFuture();
+  sendAnnouncement(
+      PrefixPathIds{{kV4Prefix1, kDefaultPathID}}, iBgpPeer_, dcAttrs);
+  sendAnnouncement(
+      PrefixPathIds{{kV6Prefix1, kDefaultPathID}}, eBgpPeer1_, bbAttrs);
+  sendInitialPathComputation(std::chrono::milliseconds(0));
+  fibFuture.wait();
+
+  EXPECT_NE(nullptr, rib_->getBestPath(kV4Prefix1));
+  EXPECT_EQ(nullptr, rib_->getBestPath(kV6Prefix1));
+  EXPECT_EQ(1, inactivePathCount());
+
+  const auto dcInfo = rib_->getNexthopInfoForNexthop(kPeerAddr1);
+  ASSERT_TRUE(dcInfo.has_value());
+  EXPECT_TRUE(*dcInfo->is_reachable());
+  EXPECT_FALSE(dcInfo->igp_cost().has_value());
+  EXPECT_TRUE(*dcInfo->is_resolved_for_selection());
+  EXPECT_TRUE(dcInfo->last_reachability_change_age_s().has_value());
+  EXPECT_FALSE(dcInfo->last_igp_cost_change_age_s().has_value());
+
+  const auto bbInfo = rib_->getNexthopInfoForNexthop(kPeerAddr2);
+  ASSERT_TRUE(bbInfo.has_value());
+  EXPECT_TRUE(*bbInfo->is_reachable());
+  EXPECT_FALSE(bbInfo->igp_cost().has_value());
+  EXPECT_FALSE(*bbInfo->is_resolved_for_selection());
+
+  auto checkLegacyPaths = [](const auto& entries, bool inactive) {
+    ASSERT_EQ(entries.size(), 1);
+    for (const auto& [_, paths] : entries[0].paths().value()) {
+      for (const auto& path : paths) {
+        EXPECT_FALSE(path.igp_cost().has_value());
+        EXPECT_EQ(inactive, path.is_inactive().value_or(false));
+      }
+    }
+  };
+  checkLegacyPaths(rib_->getRibEntries(TBgpAfi::AFI_IPV4), false);
+  checkLegacyPaths(rib_->getRibEntries(TBgpAfi::AFI_IPV6), true);
+
+  auto checkCanonicalPaths = [](const auto& state, bool inactive) {
+    ASSERT_EQ(state.rib_entries()->size(), 1);
+    for (const auto& [_, entry] : state.rib_entries().value()) {
+      for (const auto& [_, paths] : entry.paths().value()) {
+        for (const auto& path : paths) {
+          EXPECT_FALSE(path.igp_cost().has_value());
+          EXPECT_EQ(inactive, path.is_inactive().value_or(false));
+        }
+      }
+    }
+  };
+  checkCanonicalPaths(rib_->getRibEntriesCanonical(TBgpAfi::AFI_IPV4), false);
+  checkCanonicalPaths(rib_->getRibEntriesCanonical(TBgpAfi::AFI_IPV6), true);
+
+  auto tcData = fb303::ThreadCachedServiceData::get();
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  fibFuture = fib_->getFibProgramFuture();
+  updateCacheAndNotifyRib({NexthopStatus(
+      kPeerAddr1,
+      /*isReachable=*/false,
+      /*igpCost=*/std::nullopt,
+      /*isConnected=*/std::nullopt,
+      /*excludeNexthopWithoutCost=*/false)});
+  fibFuture.wait();
+  EXPECT_EQ(nullptr, rib_->getBestPath(kV4Prefix1));
+  EXPECT_EQ(2, inactivePathCount());
+  tcData->publishStats();
+  EXPECT_EQ(2, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  fibFuture = fib_->getFibProgramFuture();
+  updateCacheAndNotifyRib({dcStatus});
+  fibFuture.wait();
+  EXPECT_NE(nullptr, rib_->getBestPath(kV4Prefix1));
+  EXPECT_EQ(1, inactivePathCount());
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+}
+
+TEST_F(RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect) {
+  RibStats::initCounters();
+  setNexthopTrackingFeatureFlag(true);
+  rib_->setFibBatchTime(milliseconds(2));
+  updateCacheAndNotifyRib({NexthopStatus(kPeerAddr1, false)});
+
+  auto attrs =
+      std::make_shared<facebook::bgp::BgpPath>(*buildBgpPathFields(4, 4, 4, 4));
+  attrs->setNexthop(kPeerAddr1);
+  attrs->publish();
+
+  auto fibFuture = fib_->getFibProgramFuture();
+  sendAnnouncement(
+      PrefixPathIds{{kV4Prefix1, kDefaultPathID}}, iBgpPeer_, attrs);
+  sendInitialPathComputation(std::chrono::milliseconds(0));
+  fibFuture.wait();
+
+  EXPECT_CALL(*rib_, prepareFibProgramming_()).Times(0);
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    auto updates = rib_->nexthopCache_->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, true, std::nullopt)});
+    ASSERT_EQ(updates.size(), 1);
+    rib_->processRibInNexthopUpdate(RibInNexthopUpdate(std::move(updates)));
+    EXPECT_FALSE(rib_->fibBatchTimer_->isScheduled());
+  });
+  testing::Mock::VerifyAndClearExpectations(rib_.get());
+
+  auto info = rib_->getNexthopInfoForNexthop(kPeerAddr1);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_TRUE(*info->is_reachable());
+  EXPECT_FALSE(info->igp_cost().has_value());
+  EXPECT_FALSE(*info->is_resolved_for_selection());
+  EXPECT_TRUE(info->last_reachability_change_age_s().has_value());
+  EXPECT_FALSE(info->last_igp_cost_change_age_s().has_value());
+  EXPECT_EQ(nullptr, rib_->getBestPath(kV4Prefix1));
+
+  auto tcData = fb303::ThreadCachedServiceData::get();
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  EXPECT_CALL(*rib_, prepareFibProgramming_()).Times(1);
+  fibFuture = fib_->getFibProgramFuture();
+  updateCacheAndNotifyRib({NexthopStatus(kPeerAddr1, true, 50)});
+  fibFuture.wait();
+  testing::Mock::VerifyAndClearExpectations(rib_.get());
+
+  info = rib_->getNexthopInfoForNexthop(kPeerAddr1);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_TRUE(*info->is_resolved_for_selection());
+  EXPECT_EQ(info->igp_cost(), 50);
+  tcData->publishStats();
+  EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  EXPECT_CALL(*rib_, prepareFibProgramming_()).Times(1);
+  auto ribFuture = rib_->getRibPrepareFibProgrammingFuture();
+  updateCacheAndNotifyRib({NexthopStatus(kPeerAddr1, true, 100)});
+  ribFuture.wait();
+  testing::Mock::VerifyAndClearExpectations(rib_.get());
+
+  info = rib_->getNexthopInfoForNexthop(kPeerAddr1);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_TRUE(*info->is_resolved_for_selection());
+  EXPECT_EQ(info->igp_cost(), 100);
+  tcData->publishStats();
+  EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  EXPECT_CALL(*rib_, prepareFibProgramming_()).Times(1);
+  fibFuture = fib_->getFibProgramFuture();
+  updateCacheAndNotifyRib({NexthopStatus(kPeerAddr1, true, std::nullopt)});
+  fibFuture.wait();
+  testing::Mock::VerifyAndClearExpectations(rib_.get());
+
+  info = rib_->getNexthopInfoForNexthop(kPeerAddr1);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_TRUE(*info->is_reachable());
+  EXPECT_FALSE(*info->is_resolved_for_selection());
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(iBgpPeer_, nullptr, prefixPathId);
+  });
+  EXPECT_FALSE(rib_->getNexthopInfoForNexthop(kPeerAddr1).has_value());
+  EXPECT_FALSE(rib_->nexthopCache_->isRegistered(kPeerAddr1));
+  const auto retainedStatus =
+      rib_->nexthopCache_->registerAndGetNexthopStatus(kPeerAddr1);
+  EXPECT_TRUE(retainedStatus.isReachable());
+  EXPECT_FALSE(retainedStatus.getIgpCost().has_value());
   tcData->publishStats();
   EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
 }

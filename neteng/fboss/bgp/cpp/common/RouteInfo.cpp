@@ -301,12 +301,16 @@ void RouteInfo::setNexthopInfo(const NexthopInfoBase* nexthopInfo) {
   nexthopInfo_ = nexthopInfo;
 }
 
-bool RouteInfo::isNextHopReachable() const {
-  // Local routes are always considered reachable
+bool RouteInfo::isNexthopReachable() const {
+  // Local routes do not require nexthop resolution.
   if (getIsRouteLocal()) {
     return true;
   }
-  return getIgpCostValue() != std::numeric_limits<uint32_t>::max();
+  return nexthopInfo_ != nullptr && nexthopInfo_->isReachable();
+}
+
+bool RouteInfo::hasIgpCost() const {
+  return nexthopInfo_ != nullptr && nexthopInfo_->getIgpCost().has_value();
 }
 
 bool RouteInfo::isResolvedForSelection() const {

@@ -109,11 +109,9 @@ TEST_F(NexthopInfoTest, NexthopInfoTracksLinkedRouteInfo) {
 }
 
 /*
- * isResolvedForSelection() decouples best-path eligibility from the
- * cost-derived isReachable(): a reachable nexthop with no IGP cost is still
- * reported unreachable (so ODS/CLI see the cost-not-set case unchanged), yet it
- * stays eligible for selection only when excludeNexthopWithoutCost is disabled
- * (FBOSS), and is excluded when it is enabled (EBB / default).
+ * Source reachability and best-path eligibility are separate. A reachable
+ * nexthop without an IGP cost is eligible only when the platform allows
+ * selection without a cost.
  */
 TEST_F(NexthopInfoTest, IsResolvedForSelection) {
   folly::IPAddress nh("2620:0:1cff:dead:bef1:ffff:ffff:2");
@@ -124,30 +122,26 @@ TEST_F(NexthopInfoTest, IsResolvedForSelection) {
   EXPECT_TRUE(reachableWithCost.isReachable());
   EXPECT_TRUE(reachableWithCost.isResolvedForSelection());
 
-  /*
-   * Reachable, no cost, EBB policy (default true): reported unreachable AND
-   * excluded from selection -- identical to today's cost-not-set behavior.
-   */
+  // EBB reports the source reachability but requires a cost for selection.
   const NexthopStatus ebbNoCost(
       nh,
       /*isReachable=*/true,
       /*igpCost=*/std::nullopt,
       /*isConnected=*/std::nullopt,
       /*excludeNexthopWithoutCost=*/true);
-  EXPECT_FALSE(ebbNoCost.isReachable());
+  EXPECT_TRUE(ebbNoCost.isReachable());
+  EXPECT_FALSE(ebbNoCost.getIgpCost().has_value());
   EXPECT_FALSE(ebbNoCost.isResolvedForSelection());
 
-  /*
-   * Reachable, no cost, FBOSS policy (false): still reported unreachable to
-   * ODS/CLI, but resolved for best-path selection.
-   */
+  // FBOSS reports the same reachability and allows selection without a cost.
   const NexthopStatus fbossNoCost(
       nh,
       /*isReachable=*/true,
       /*igpCost=*/std::nullopt,
       /*isConnected=*/std::nullopt,
       /*excludeNexthopWithoutCost=*/false);
-  EXPECT_FALSE(fbossNoCost.isReachable());
+  EXPECT_TRUE(fbossNoCost.isReachable());
+  EXPECT_FALSE(fbossNoCost.getIgpCost().has_value());
   EXPECT_TRUE(fbossNoCost.isResolvedForSelection());
 
   // Unreachable: excluded under either policy.
@@ -162,12 +156,10 @@ TEST_F(NexthopInfoTest, IsResolvedForSelection) {
 }
 
 /*
- * RouteInfo::isResolvedForSelection() reflects the linked nexthop's policy: an
- * unlinked non-local route is not resolved, a route linked to a reachable
- * FBOSS-policy nexthop with no cost is resolved (despite reporting
- * unreachable), and one linked to an EBB-policy no-cost nexthop is excluded.
+ * RouteInfo uses the linked nexthop's platform policy when it checks whether
+ * the route is eligible for best-path selection.
  */
-TEST_F(NexthopInfoTest, RouteInfoResolvedForSelectionFromNexthop) {
+TEST_F(NexthopInfoTest, RouteInfoReachabilityAndResolutionFromNexthop) {
   auto routeInfo = createRouteInfo(
       kV4Prefix1,
       kPeerAddr2,
@@ -180,12 +172,10 @@ TEST_F(NexthopInfoTest, RouteInfoResolvedForSelectionFromNexthop) {
 
   // Non-local route with no linked nexthop: not resolved.
   EXPECT_FALSE(routeInfo->getIsRouteLocal());
+  EXPECT_FALSE(routeInfo->isNexthopReachable());
   EXPECT_FALSE(routeInfo->isResolvedForSelection());
 
-  /*
-   * Reachable-no-cost FBOSS nexthop: resolved for selection even though the
-   * nexthop reports unreachable (cost unset).
-   */
+  // A reachable FBOSS nexthop does not require a cost for selection.
   const NexthopStatus fbossNoCost(
       nh,
       /*isReachable=*/true,
@@ -194,7 +184,8 @@ TEST_F(NexthopInfoTest, RouteInfoResolvedForSelectionFromNexthop) {
       /*excludeNexthopWithoutCost=*/false);
   NexthopInfo fbossInfo(fbossNoCost);
   fbossInfo.linkRouteInfo(*routeInfo);
-  EXPECT_FALSE(routeInfo->isNextHopReachable());
+  EXPECT_TRUE(routeInfo->isNexthopReachable());
+  EXPECT_FALSE(routeInfo->hasIgpCost());
   EXPECT_TRUE(routeInfo->isResolvedForSelection());
   fbossInfo.unlinkRouteInfo(*routeInfo);
 
@@ -207,6 +198,17 @@ TEST_F(NexthopInfoTest, RouteInfoResolvedForSelectionFromNexthop) {
       /*excludeNexthopWithoutCost=*/true);
   NexthopInfo ebbInfo(ebbNoCost);
   ebbInfo.linkRouteInfo(*routeInfo);
+  EXPECT_TRUE(routeInfo->isNexthopReachable());
+  EXPECT_FALSE(routeInfo->hasIgpCost());
   EXPECT_FALSE(routeInfo->isResolvedForSelection());
   ebbInfo.unlinkRouteInfo(*routeInfo);
+
+  const NexthopStatus unreachable(
+      nh, /*isReachable=*/false, /*igpCost=*/std::nullopt);
+  NexthopInfo unreachableInfo(unreachable);
+  unreachableInfo.linkRouteInfo(*routeInfo);
+  EXPECT_FALSE(routeInfo->isNexthopReachable());
+  EXPECT_FALSE(routeInfo->hasIgpCost());
+  EXPECT_FALSE(routeInfo->isResolvedForSelection());
+  unreachableInfo.unlinkRouteInfo(*routeInfo);
 }

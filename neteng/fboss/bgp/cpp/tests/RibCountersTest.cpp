@@ -194,13 +194,13 @@ TEST(RibCountersTest, UnresolvableNexthopsTracksFieldAndFb303) {
   RibStats::initCounters();
   RibCounters c;
 
-  c.onUnresolvableNexthopAdded();
-  c.onUnresolvableNexthopAdded();
-  c.onUnresolvableNexthopAdded();
+  c.incrementUnresolvableNexthopCount();
+  c.incrementUnresolvableNexthopCount();
+  c.incrementUnresolvableNexthopCount();
   EXPECT_EQ(3, c.unresolvableNexthops());
   EXPECT_EQ(3, counter(RibStats::kRibUnresolvableNexthopsCount));
 
-  c.onUnresolvableNexthopRemoved();
+  c.decrementUnresolvableNexthopCount();
   EXPECT_EQ(2, c.unresolvableNexthops());
   EXPECT_EQ(2, counter(RibStats::kRibUnresolvableNexthopsCount));
 }
@@ -302,7 +302,7 @@ TEST(RibCountersTest, ResetZeroesInMemoryFields) {
   c.publishTotalPathCounters();
   c.publishInactivePathCounters();
   c.setOriginatedRoutes(5);
-  c.onUnresolvableNexthopAdded();
+  c.incrementUnresolvableNexthopCount();
   c.onBestpathSourceChanged(
       /*isV4=*/true, std::nullopt, BgpRouteType::EBGP);
 

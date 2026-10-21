@@ -73,13 +73,17 @@ std::vector<NexthopStatus> NexthopCache::addOrUpdateNextHopStatus(
           continue;
         }
 
-        // Check if there's a change in the update
-        bool isReachabilityChanged =
+        const bool isReachabilityChanged =
             currentStatus.isReachable() != nexthopStatus.isReachable();
-        bool isIgpCostChanged =
+        const bool isIgpCostChanged =
             currentStatus.getIgpCost() != nexthopStatus.getIgpCost();
+        const bool isResolvabilityChanged =
+            currentStatus.isResolvedForSelection() !=
+            nexthopStatus.isResolvedForSelection();
+        const bool isNexthopStatusChanged =
+            isReachabilityChanged || isIgpCostChanged || isResolvabilityChanged;
 
-        if (!isReachabilityChanged && !isIgpCostChanged) {
+        if (!isNexthopStatusChanged) {
           XLOGF(
               DBG2,
               "No change in nexthop status for {}, reachable: {}, igpCost: {}, registeredFromRib: {}",
@@ -95,16 +99,18 @@ std::vector<NexthopStatus> NexthopCache::addOrUpdateNextHopStatus(
         // Log the change in status
         XLOGF(
             DBG2,
-            "Updating nexthop status for {} from reachable: {}, igpCost: {} to reachable: {}, igpCost: {}, registeredFromRib: {}",
+            "Updating nexthop status for {} from reachable: {}, igpCost: {}, resolvedForSelection: {} to reachable: {}, igpCost: {}, resolvedForSelection: {}, registeredFromRib: {}",
             nexthopIp.str(),
             currentStatus.isReachable(),
             currentStatus.getIgpCost().has_value()
                 ? std::to_string(currentStatus.getIgpCost().value())
                 : "unset",
+            currentStatus.isResolvedForSelection(),
             nexthopStatus.isReachable(),
             nexthopStatus.getIgpCost().has_value()
                 ? std::to_string(nexthopStatus.getIgpCost().value())
                 : "unset",
+            nexthopStatus.isResolvedForSelection(),
             isRegisteredFromRib);
 
         // Update the status while preserving the registration flag
@@ -160,9 +166,9 @@ NexthopStatus NexthopCache::registerAndGetNexthopStatus(
 
   /*
    * Whether to fire the registration hook after releasing the lock: true when
-   * the registered nexthop has no reachable answer yet (new entry, or an
-   * existing entry that is currently unreachable), so the on-demand resolver
-   * gets a chance to look it up.
+   * the source does not report the nexthop as reachable or its IGP cost is
+   * missing. Selection eligibility is separate: a cost-optional source may
+   * remain eligible while the on-demand resolver tries to supply the metric.
    */
   bool needsResolution = false;
 
@@ -175,7 +181,8 @@ NexthopStatus NexthopCache::registerAndGetNexthopStatus(
           // Mark this nexthop as registered from RIB
           auto& [entryStatus, isRegisteredFromRib] = it->second;
           isRegisteredFromRib = true;
-          needsResolution = !entryStatus.isReachable();
+          needsResolution = !entryStatus.isReachable() ||
+              !entryStatus.getIgpCost().has_value();
 
           XLOGF(
               DBG2,

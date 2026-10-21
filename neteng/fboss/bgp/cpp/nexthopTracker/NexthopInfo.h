@@ -31,8 +31,8 @@ class NexthopInfo : public NexthopInfoBase {
  public:
   explicit NexthopInfo(const NexthopStatus& status) : status_(status) {
     /*
-     * Stamp the initial resolution state so "never resolved" (unset) is
-     * distinguishable from "resolved at least once".
+     * Stamp the initial reachability and cost states so an unset timestamp is
+     * distinguishable from a value received at creation.
      */
     const auto now = std::chrono::steady_clock::now();
     if (status_.isReachable()) {
@@ -64,7 +64,7 @@ class NexthopInfo : public NexthopInfoBase {
     return status_.getNexthop();
   }
 
-  bool isReachable() const {
+  bool isReachable() const override {
     return status_.isReachable();
   }
 
@@ -106,8 +106,8 @@ class NexthopInfo : public NexthopInfoBase {
 
   /**
    * @brief Time of the last reachability transition for this nexthop.
-   * @return steady_clock time_point of the last change; nullopt if the nexthop
-   *         has never been reachable (i.e. never resolved).
+   * @return steady_clock time_point of the last change; nullopt if the source
+   *         has never reported the nexthop as reachable.
    */
   std::optional<std::chrono::steady_clock::time_point>
   getLastReachabilityChangeTs() const {
@@ -117,7 +117,7 @@ class NexthopInfo : public NexthopInfoBase {
   /**
    * @brief Time of the last IGP-cost change for this nexthop.
    * @return steady_clock time_point of the last change; nullopt if a cost has
-   *         never been received (i.e. never resolved).
+   *         never been received.
    */
   std::optional<std::chrono::steady_clock::time_point> getLastIgpCostChangeTs()
       const {
@@ -161,7 +161,7 @@ class NexthopInfo : public NexthopInfoBase {
   NexthopAssociationList nexthopAssociationList_;
   /*
    * Timestamps of the last reachability / IGP-cost change. nullopt means the
-   * corresponding value has never been resolved since this entry was created.
+   * corresponding value has never been reported since this entry was created.
    */
   std::optional<std::chrono::steady_clock::time_point>
       lastReachabilityChangeTs_;

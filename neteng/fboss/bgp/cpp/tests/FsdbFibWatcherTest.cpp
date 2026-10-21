@@ -668,7 +668,9 @@ CO_TEST_F(FsdbFibWatcherTest, ProcessFibUpdateNexthopWithoutCost) {
           /*streamRevision=*/std::nullopt});
 
   auto status = nexthopCache_->registerAndGetNexthopStatus(kPeerV4);
+  EXPECT_TRUE(status.isReachable());
   EXPECT_EQ(std::nullopt, status.getIgpCost());
+  EXPECT_TRUE(status.isResolvedForSelection());
 }
 
 CO_TEST_F(FsdbFibWatcherTest, ProcessFibUpdateMixedCostNexthopsV6) {
@@ -825,7 +827,9 @@ CO_TEST_F(FsdbFibWatcherTest, ProcessFibUpdateCostRemovedWhileReachable) {
           /*streamRevision=*/std::nullopt});
 
   auto status2 = nexthopCache_->registerAndGetNexthopStatus(kPeerV4);
+  EXPECT_TRUE(status2.isReachable());
   EXPECT_EQ(std::nullopt, status2.getIgpCost());
+  EXPECT_TRUE(status2.isResolvedForSelection());
 }
 
 CO_TEST_F(FsdbFibWatcherTest, ProcessFibUpdateUnreachableCostIsNullopt) {

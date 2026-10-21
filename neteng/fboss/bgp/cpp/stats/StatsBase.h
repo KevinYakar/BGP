@@ -560,7 +560,7 @@ inline const auto kRibPrefixCount =
 void incrRibPrefixCount();
 void decrRibPrefixCount();
 
-// Number of unresolvable nexthops in the RIB
+// Number of unresolved nexthops referenced by at least one RIB path
 inline const auto kRibUnresolvableNexthopsCount =
     fmt::format("{}.rib.unresolvable_nexthops.count", kBgpcppTag);
 void incrUnresolvableNexthopsCount();

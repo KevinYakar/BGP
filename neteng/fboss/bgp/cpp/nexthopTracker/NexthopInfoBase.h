@@ -48,9 +48,14 @@ class NexthopInfoBase {
 
   /**
    * @brief Get the IGP cost to reach the nexthop
-   * @return Optional IGP cost, nullopt if the nexthop is unreachable
+   * @return Optional IGP cost, or nullopt if no cost is available.
    */
   virtual std::optional<uint32_t> getIgpCost() const = 0;
+
+  /**
+   * @brief Whether the source reports the nexthop as reachable.
+   */
+  virtual bool isReachable() const = 0;
 
   virtual std::optional<bool> isConnected() const = 0;
 

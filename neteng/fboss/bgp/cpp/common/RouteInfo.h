@@ -149,14 +149,9 @@ struct RouteInfo : nettools::edge::RouteBase {
   folly::IntrusiveListHook nextHopListHook_;
   bool isOnNextHopList() const;
   void setNexthopInfo(const NexthopInfoBase* nexthopInfo);
-  bool isNextHopReachable() const;
-  /*
-   * Whether this route's nexthop is resolved for best-path selection. Differs
-   * from isNextHopReachable() for a reachable nexthop with no IGP cost: such a
-   * nexthop is reported unreachable (and to ODS/CLI as cost-not-set) but stays
-   * eligible for selection when the source disables excludeNexthopWithoutCost
-   * (FBOSS). See NexthopStatus::isResolvedForSelection().
-   */
+  bool isNexthopReachable() const;
+  bool hasIgpCost() const;
+  /* Whether this route's nexthop is resolved for best-path selection. */
   bool isResolvedForSelection() const;
 
   // Get the ribEntry reference
