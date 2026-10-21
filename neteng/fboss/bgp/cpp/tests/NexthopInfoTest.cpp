@@ -108,6 +108,66 @@ TEST_F(NexthopInfoTest, NexthopInfoTracksLinkedRouteInfo) {
   EXPECT_EQ(nexthopInfo_->getRouteInfoListSize(), 0);
 }
 
+TEST_F(NexthopInfoTest, DestroyingRouteInfoUnlinksAssociation) {
+  auto routeInfo = createRouteInfo(
+      kV4Prefix1,
+      kPeerAddr2,
+      kPeerAddr1,
+      kLocalPref,
+      {},
+      kPeerAsn2,
+      kPeerRouterId2);
+  nexthopInfo_->linkRouteInfo(*routeInfo);
+  ASSERT_EQ(nexthopInfo_->getRouteInfoListSize(), 1);
+
+  routeInfo.reset();
+
+  EXPECT_TRUE(nexthopInfo_->isRouteInfoListEmpty());
+  EXPECT_EQ(nexthopInfo_->getRouteInfoListSize(), 0);
+}
+
+TEST_F(NexthopInfoTest, DestroyingNexthopInfoUnlinksAssociation) {
+  auto routeInfo = createRouteInfo(
+      kV4Prefix1,
+      kPeerAddr2,
+      kPeerAddr1,
+      kLocalPref,
+      {},
+      kPeerAsn2,
+      kPeerRouterId2);
+  nexthopInfo_->linkRouteInfo(*routeInfo);
+  ASSERT_TRUE(routeInfo->isOnNextHopList());
+
+  nexthopInfo_.reset();
+
+  EXPECT_FALSE(routeInfo->isOnNextHopList());
+  EXPECT_EQ(routeInfo->getIgpCostValue(), std::numeric_limits<uint32_t>::max());
+}
+
+TEST_F(NexthopInfoTest, MoveConstructionPreservesAssociation) {
+  auto routeInfo = createRouteInfo(
+      kV4Prefix1,
+      kPeerAddr2,
+      kPeerAddr1,
+      kLocalPref,
+      {},
+      kPeerAsn2,
+      kPeerRouterId2);
+  nexthopInfo_->linkRouteInfo(*routeInfo);
+
+  NexthopInfo movedNexthopInfo(std::move(*nexthopInfo_));
+  nexthopInfo_.reset();
+  movedNexthopInfo.updateStatus(
+      NexthopStatus(nexthopStatus_->getNexthop(), true, 200));
+
+  EXPECT_TRUE(routeInfo->isOnNextHopList());
+  EXPECT_EQ(routeInfo->getIgpCostValue(), 200);
+  EXPECT_EQ(movedNexthopInfo.getRouteInfoListSize(), 1);
+
+  routeInfo.reset();
+  EXPECT_TRUE(movedNexthopInfo.isRouteInfoListEmpty());
+}
+
 /*
  * Source reachability and best-path eligibility are separate. A reachable
  * nexthop without an IGP cost is eligible only when the platform allows

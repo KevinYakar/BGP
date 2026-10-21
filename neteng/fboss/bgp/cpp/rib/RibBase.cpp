@@ -321,8 +321,8 @@ void RibBase::cleanupCommon() noexcept {
    * Clear heavy data structures during controlled shutdown to prevent
    * systemd timeout during destructor. The ribEntries_ map can contain
    * hundreds of thousands of routes, each with nested shared_ptr<RouteInfo>.
-   * Clearing here while nexthopInfoMap_ is still valid ensures RouteInfo's
-   * auto_unlink hooks can safely unlink from NexthopInfo's intrusive lists.
+   * Clearing here while nexthopInfoMap_ is still valid lets RouteInfo
+   * destructors unlink from their NexthopInfo association lists.
    */
   XLOGF(
       INFO, "[Exit] Clearing ribEntries_ ({} entries)...", ribEntries_.size());
@@ -3543,23 +3543,14 @@ bool RibBase::checkAndDeleteNexthopInfo(const folly::IPAddress& nexthop) {
     return false;
   }
 
-  // Extract values from the NexthopInfo
   const auto& nexthopInfo = it->second;
-  uint32_t routeInfoCount = nexthopInfo.getRouteInfoListSize();
-
-  XLOGF(
-      DBG3,
-      "Checking if NexthopInfo for {} should be deleted: routeInfoCount={}",
-      nexthop.str(),
-      routeInfoCount);
 
   // If there are RouteInfo objects associated with this nexthop, don't delete
-  if (routeInfoCount != 0) {
+  if (!nexthopInfo.isRouteInfoListEmpty()) {
     XLOGF(
         DBG3,
-        "Not deleting NexthopInfo for {}: still has {} RouteInfo objects",
-        nexthop.str(),
-        routeInfoCount);
+        "Not deleting NexthopInfo for {}: still has associated RouteInfo objects",
+        nexthop.str());
     return false;
   }
   /*

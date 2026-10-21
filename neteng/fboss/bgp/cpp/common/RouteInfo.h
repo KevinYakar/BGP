@@ -103,6 +103,11 @@ struct RouteInfo : nettools::edge::RouteBase {
       RibEntry& ribEntry,
       std::optional<uint32_t> pathIdToSend = std::nullopt,
       bool installToFib = true);
+  RouteInfo(const RouteInfo&) = delete;
+  RouteInfo& operator=(const RouteInfo&) = delete;
+  RouteInfo(RouteInfo&&) = delete;
+  RouteInfo& operator=(RouteInfo&&) = delete;
+  ~RouteInfo() override;
 
   folly::CIDRNetwork getPrefix() const;
   uint8_t getBgpPrefixLength() const override;
@@ -146,9 +151,10 @@ struct RouteInfo : nettools::edge::RouteBase {
   std::string str() const;
 
   // nexthop tracking related declarations
-  folly::IntrusiveListHook nextHopListHook_;
+  folly::SafeIntrusiveListHook nextHopListHook_;
   bool isOnNextHopList() const;
-  void setNexthopInfo(const NexthopInfoBase* nexthopInfo);
+  void setNexthopInfo(NexthopInfoBase* nexthopInfo);
+  void unlinkFromNexthopInfo() noexcept;
   bool isNexthopReachable() const;
   bool hasIgpCost() const;
   /* Whether this route's nexthop is resolved for best-path selection. */
@@ -171,7 +177,7 @@ struct RouteInfo : nettools::edge::RouteBase {
    * Lifetime managed by NexthopInfo via explicit link/unlink calls
    * MUST be null-checked before use
    */
-  const NexthopInfoBase* nexthopInfo_{nullptr};
+  NexthopInfoBase* nexthopInfo_{nullptr};
 
   /*
    * reference to the ribEntry to avoid lookups when this path is accessed

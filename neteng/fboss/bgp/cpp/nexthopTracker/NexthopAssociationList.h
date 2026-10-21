@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include <folly/container/IntrusiveList.h>
 #include <folly/logging/xlog.h>
 #include "neteng/fboss/bgp/cpp/common/RouteInfo.h"
@@ -40,10 +42,6 @@ class NexthopAssociationList {
    *         false if the RouteInfo was already in the list and not linked
    */
   bool link(RouteInfo& routeInfo) {
-    /*
-     * If the routeInfo is not already associated with the nexthop, link it
-     * to the list and increment the size
-     */
     if (routeInfo.nextHopListHook_.is_linked()) {
       XLOG(
           DBG2,
@@ -51,7 +49,6 @@ class NexthopAssociationList {
       return false;
     }
     routeInfoList_.push_back(routeInfo);
-    size_++;
     return true;
   }
 
@@ -63,23 +60,22 @@ class NexthopAssociationList {
    *         false if the RouteInfo was not in the list and couldn't be unlinked
    */
   bool unlink(RouteInfo& routeInfo) {
-    /*
-     * If the routeInfo is associated with the nexthop, unlink it from the list
-     * and decrement the size
-     */
     if (!routeInfo.nextHopListHook_.is_linked()) {
       XLOG(
           DBG2,
           "Not unlinking RouteInfo from association list, RouteInfo not associated with NexthopInfo ");
       return false;
     }
-    routeInfo.nextHopListHook_.unlink();
-    size_--;
+    routeInfoList_.erase(routeInfoList_.iterator_to(routeInfo));
     return true;
   }
 
-  uint32_t size() const {
-    return size_;
+  bool empty() const {
+    return routeInfoList_.empty();
+  }
+
+  std::size_t size() const {
+    return routeInfoList_.size();
   }
 
   /**
@@ -87,6 +83,10 @@ class NexthopAssociationList {
    * @return Iterator to the beginning of the RouteInfo list
    */
   auto begin() const {
+    return routeInfoList_.begin();
+  }
+
+  auto begin() {
     return routeInfoList_.begin();
   }
 
@@ -98,11 +98,14 @@ class NexthopAssociationList {
     return routeInfoList_.end();
   }
 
+  auto end() {
+    return routeInfoList_.end();
+  }
+
  private:
   // List of routes associated with the nexthop
-  folly::IntrusiveList<RouteInfo, &RouteInfo::nextHopListHook_> routeInfoList_;
-  // Size of the list serving as the ref count
-  uint32_t size_{0};
+  folly::CountedIntrusiveList<RouteInfo, &RouteInfo::nextHopListHook_>
+      routeInfoList_;
 };
 
 } // namespace facebook::bgp

@@ -17,6 +17,7 @@
 #pragma once
 
 #include <chrono>
+#include <utility>
 
 #include <folly/logging/xlog.h>
 
@@ -50,12 +51,31 @@ class NexthopInfo : public NexthopInfoBase {
   NexthopInfo(const NexthopInfo&) = delete;
   NexthopInfo& operator=(const NexthopInfo&) = delete;
 
-  // Allow move operations
-  NexthopInfo(NexthopInfo&&) noexcept = default;
+  /**
+   * Move a NexthopInfo while keeping linked RouteInfo objects associated with
+   * the new object.
+   *
+   * This constructor can run when a NexthopInfo is inserted into
+   * nexthopInfoMap_ or is otherwise move-constructed. The association list is
+   * normally empty during map insertion. If routes are already linked, update
+   * their NexthopInfo pointers because moving the list does not update them.
+   */
+  NexthopInfo(NexthopInfo&& other) noexcept
+      : status_(std::move(other.status_)),
+        nexthopAssociationList_(std::move(other.nexthopAssociationList_)),
+        lastReachabilityChangeTs_(std::move(other.lastReachabilityChangeTs_)),
+        lastIgpCostChangeTs_(std::move(other.lastIgpCostChangeTs_)) {
+    for (auto& routeInfo : nexthopAssociationList_) {
+      routeInfo.setNexthopInfo(this);
+    }
+  }
   NexthopInfo& operator=(NexthopInfo&&) = delete;
 
-  // Virtual destructor since this class is inherited from NexthopInfoBase
-  ~NexthopInfo() override = default;
+  ~NexthopInfo() override {
+    while (!nexthopAssociationList_.empty()) {
+      unlinkRouteInfo(*nexthopAssociationList_.begin());
+    }
+  }
 
   /*
    * [Accessor Methods]
@@ -125,16 +145,23 @@ class NexthopInfo : public NexthopInfoBase {
   }
 
   void linkRouteInfo(RouteInfo& routeInfo) {
-    routeInfo.setNexthopInfo(this);
-    nexthopAssociationList_.link(routeInfo);
+    if (nexthopAssociationList_.link(routeInfo)) {
+      routeInfo.setNexthopInfo(this);
+    }
   }
 
-  void unlinkRouteInfo(RouteInfo& routeInfo) {
+  void unlinkRouteInfo(RouteInfo& routeInfo) noexcept override {
+    if (!nexthopAssociationList_.unlink(routeInfo)) {
+      return;
+    }
     routeInfo.setNexthopInfo(nullptr);
-    nexthopAssociationList_.unlink(routeInfo);
   }
 
-  uint32_t getRouteInfoListSize() const {
+  bool isRouteInfoListEmpty() const {
+    return nexthopAssociationList_.empty();
+  }
+
+  std::size_t getRouteInfoListSize() const {
     return nexthopAssociationList_.size();
   }
 

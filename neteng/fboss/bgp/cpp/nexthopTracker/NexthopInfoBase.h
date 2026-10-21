@@ -22,6 +22,8 @@
 
 namespace facebook::bgp {
 
+struct RouteInfo;
+
 /**
  * @class NexthopInfoBase
  * @brief Base interface for NexthopInfo.
@@ -64,6 +66,8 @@ class NexthopInfoBase {
    * @return true if the nexthop is eligible for best-path selection
    */
   virtual bool isResolvedForSelection() const = 0;
+
+  virtual void unlinkRouteInfo(RouteInfo& routeInfo) noexcept = 0;
 };
 
 } // namespace facebook::bgp

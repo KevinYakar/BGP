@@ -71,6 +71,10 @@ RouteInfo::RouteInfo(
   lastModifiedTime_ = getCurrentTimeMicroSec();
 }
 
+RouteInfo::~RouteInfo() {
+  unlinkFromNexthopInfo();
+}
+
 float RouteInfo::getUcmpWeight() const {
   if (ucmpWeight_.has_value()) {
     return ucmpWeight_.value();
@@ -297,8 +301,15 @@ bool RouteInfo::isOnNextHopList() const {
   return nextHopListHook_.is_linked();
 }
 
-void RouteInfo::setNexthopInfo(const NexthopInfoBase* nexthopInfo) {
+void RouteInfo::setNexthopInfo(NexthopInfoBase* nexthopInfo) {
   nexthopInfo_ = nexthopInfo;
+}
+
+void RouteInfo::unlinkFromNexthopInfo() noexcept {
+  if (nexthopInfo_ == nullptr) {
+    return;
+  }
+  nexthopInfo_->unlinkRouteInfo(*this);
 }
 
 bool RouteInfo::isNexthopReachable() const {

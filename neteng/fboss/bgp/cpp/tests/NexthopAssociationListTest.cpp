@@ -45,6 +45,7 @@ TEST_F(NexthopAssociationListTestFixture, LinkRouteInfo) {
   NexthopAssociationList nexthopList;
 
   // Initial size should be 0
+  EXPECT_TRUE(nexthopList.empty());
   EXPECT_EQ(0, nexthopList.size());
 
   // Add the RouteInfo from the fixture
@@ -52,6 +53,7 @@ TEST_F(NexthopAssociationListTestFixture, LinkRouteInfo) {
 
   // Size should be 1 after adding
   EXPECT_TRUE(addResult);
+  EXPECT_FALSE(nexthopList.empty());
   EXPECT_EQ(1, nexthopList.size());
   EXPECT_TRUE(routeInfo_->isOnNextHopList());
 
@@ -78,6 +80,7 @@ TEST_F(NexthopAssociationListTestFixture, UnlinkRouteInfo) {
 
   // Size should be 0 after removing
   EXPECT_TRUE(removeResult);
+  EXPECT_TRUE(nexthopList.empty());
   EXPECT_EQ(0, nexthopList.size());
   EXPECT_FALSE(routeInfo_->isOnNextHopList());
 
