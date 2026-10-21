@@ -32,6 +32,7 @@
   FRIEND_TEST(PeerManagerTestFixture, AdjRibOutGroupAddPathPeerEntriesTest);   \
   FRIEND_TEST(PeerManagerTestFixture, StatefulGrConfigDisabled);               \
   FRIEND_TEST(PeerManagerTestFixture, StatefulGrConfigEnabled);                \
+  FRIEND_TEST(PeerManagerTestFixture, StatefulGrKeptOnRestartBeforeRib);       \
   FRIEND_TEST(PeerManagerTestFixture, MultipleFlapTest);                       \
   FRIEND_TEST(PeerManagerTestFixture, LivePeerGroupsRefcountTest);             \
   FRIEND_TEST(PeerManagerTestFixture, LivePeerGroupsSessionLifecycleTest);     \
@@ -249,6 +250,7 @@
   FRIEND_TEST(PeerManagerTestFixture, GetEffectivePostOutPrefixCountTest);
 
 #include <algorithm>
+#include <unordered_set>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -1176,6 +1178,32 @@ TEST_F(PeerManagerTestFixture, StatefulGrConfigEnabled) {
   SUCCEED();
 }
 
+/*
+ * A restart before the initial RIB computation, e.g. back-to-back restarts,
+ * leaves the GR state file in place, so the next incarnation still waits only
+ * for the peers established at the last clean shutdown.
+ */
+TEST_F(PeerManagerTestFixture, StatefulGrKeptOnRestartBeforeRib) {
+  createGrState({kPeerId3});
+
+  // First incarnation: loads the GR state, then exits before any EoR.
+  auto firstPeerMgr = setupMockPeerManager(
+      true /* includeStaticPeer */, false /* includeDynamicShivPeer */);
+  firstPeerMgr->addPeersToSessionMgr();
+  auto firstThread = firstPeerMgr->runInThread();
+  ASSERT_FALSE(firstPeerMgr->ribInitPathComputationNotified_);
+  firstPeerMgr->markDaemonShutdown();
+  firstPeerMgr->saveGrState();
+  firstPeerMgr->stop();
+  firstThread.join();
+
+  // Next incarnation finds the same state.
+  ASSERT_TRUE(isGrStateExists());
+  const auto reloaded = firstPeerMgr->readGrState();
+  ASSERT_TRUE(reloaded.loaded);
+  EXPECT_EQ(std::unordered_set<BgpPeerId>{kPeerId3}, *reloaded.peers);
+}
+
 TEST_F(PeerManagerTestFixture, StatefulGrConfigDisabled) {
   std::vector<folly::Future<folly::Unit>> taskFutures;
 
@@ -1290,8 +1318,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrTest1) {
   // adds peers to sessionMgr
   mockPeerMgr->addPeersToSessionMgr();
 
-  // Verify GR state is deleted after reading it once.
-  EXPECT_FALSE(isGrStateExists());
+  // GR state is kept until the initial RIB computation.
+  EXPECT_TRUE(isGrStateExists());
 
   auto& fm =
       folly::fibers::getFiberManager(mockPeerMgr->getEventBase(), options_);
@@ -1314,6 +1342,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrTest1) {
      * all static and dynamic peers EORs received
      */
     EXPECT_TRUE(mockPeerMgr->ribInitPathComputationNotified_);
+    // Removed once RIB was notified.
+    EXPECT_FALSE(isGrStateExists());
     /*
      * Ensure that RIB was notified about EOR without timer needing to be
      * fired
@@ -1357,8 +1387,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrTest2) {
   // adds peers to sessionMgr
   mockPeerMgr->addPeersToSessionMgr();
 
-  // Verify GR state is deleted after reading it once.
-  EXPECT_FALSE(isGrStateExists());
+  // GR state is kept until the initial RIB computation.
+  EXPECT_TRUE(isGrStateExists());
 
   auto& fm =
       folly::fibers::getFiberManager(mockPeerMgr->getEventBase(), options_);
@@ -1387,6 +1417,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrTest2) {
      * all static peers EORs received (we ignored stale saved info)
      */
     EXPECT_TRUE(mockPeerMgr->ribInitPathComputationNotified_);
+    // Removed once RIB was notified.
+    EXPECT_FALSE(isGrStateExists());
   });
   taskFutures.emplace_back(std::move(fiber));
 
@@ -1485,8 +1517,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrTest4) {
   // adds peers to sessionMgr
   mockPeerMgr->addPeersToSessionMgr();
 
-  // Verify GR state is deleted after reading it once.
-  EXPECT_FALSE(isGrStateExists());
+  // GR state is kept until the initial RIB computation.
+  EXPECT_TRUE(isGrStateExists());
 
   auto& fm =
       folly::fibers::getFiberManager(mockPeerMgr->getEventBase(), options_);
@@ -1506,6 +1538,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrTest4) {
      */
     mockPeerMgr->processPeerEoR(kDynamicPeerId1);
     EXPECT_TRUE(mockPeerMgr->ribInitPathComputationNotified_);
+    // Removed once RIB was notified.
+    EXPECT_FALSE(isGrStateExists());
   });
   taskFutures.emplace_back(std::move(fiber));
 
@@ -1576,8 +1610,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrConvergenceTest) {
         true); // enableStatefulHa
     peerMgr->adjRibs_[kPeerId3] = adjRib;
 
-    // Verify GR state is deleted after reading it once.
-    EXPECT_FALSE(isGrStateExists());
+    // GR state is kept until the initial RIB computation.
+    EXPECT_TRUE(isGrStateExists());
 
     // Verify we have 1 peer in static EOR waiting list
     EXPECT_EQ(1, peerMgr->staticPeerEoRReceived_.size());
@@ -1613,6 +1647,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrConvergenceTest) {
 
       // Ensure RIB is notified immediately without any delay
       EXPECT_TRUE(peerMgr->ribInitPathComputationNotified_);
+      // Removed once RIB was notified.
+      EXPECT_FALSE(isGrStateExists());
 
       // Verify that the entry has been removed from AdjRibInStale
       EXPECT_EQ(0, adjRib->adjRibInLiteTree_.size());
@@ -1705,8 +1741,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrConvergenceTestWithNoGrNeighbor) {
         true); // enableStatefulHa
     peerMgr->adjRibs_[kPeerId3] = adjRib;
 
-    // Verify GR state is deleted after reading it once.
-    EXPECT_FALSE(isGrStateExists());
+    // GR state is kept until the initial RIB computation.
+    EXPECT_TRUE(isGrStateExists());
 
     // Verify we have 1 peer each in static/dynamic EOR waiting list
     EXPECT_EQ(1, peerMgr->staticPeerEoRReceived_.size());
@@ -1740,6 +1776,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrConvergenceTestWithNoGrNeighbor) {
        * all static and dynamic peers EORs received
        */
       EXPECT_TRUE(peerMgr->ribInitPathComputationNotified_);
+      // Removed once RIB was notified.
+      EXPECT_FALSE(isGrStateExists());
       /*
        * Ensure that RIB was notified about EOR without timer needing to be
        * fired
@@ -1842,8 +1880,8 @@ TEST_F(PeerManagerTestFixture, StatefulGrConvergenceTestWithNoGrNeighbor2) {
         true); // enableStatefulHa
     peerMgr->adjRibs_[kPeerId3] = adjRib;
 
-    // Verify GR state is deleted after reading it once.
-    EXPECT_FALSE(isGrStateExists());
+    // GR state is kept until the initial RIB computation.
+    EXPECT_TRUE(isGrStateExists());
 
     // Verify we have 1 peer each in static/dynamic EOR waiting list
     EXPECT_EQ(1, peerMgr->staticPeerEoRReceived_.size());

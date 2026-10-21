@@ -3251,6 +3251,27 @@ void PeerManagerBase::notifyRibInitialPathComputation(
   ribInitPathComputationNotified_ = true;
 
   /*
+   * Remove the GR state file only now, once the initial RIB computation has
+   * been triggered, and not when it is read at startup.
+   *
+   * Despite its name, the file carries no Graceful Restart state that BGP++
+   * relies on: it does not track whether peers are still in GR helper mode or
+   * still hold our routes. Its only use is at startup, to decide which peers
+   * to wait for EoR from before computing the RIB: the peers that were
+   * Established and GR capable at the last clean shutdown, instead of every
+   * configured static peer (see addPeersToSessionMgr()).
+   *
+   * That wait list stays valid until the initial RIB computation. If bgpd
+   * restarts before this point, e.g. back-to-back restarts a few seconds apart
+   * or a crash during startup, the next start must find the same file.
+   * Otherwise it falls back to waiting for EoR from every configured static
+   * peer, including peers that cannot come up (drained or down), until
+   * eor_time_s expires. After this point the list is no longer needed, and a
+   * clean shutdown writes a new one in saveGrState().
+   */
+  std::remove(FLAGS_gr_state_file.c_str());
+
+  /*
    * Budget RIB may spend waiting for all registered nexthops to resolve before
    * its initial full-sync, so the sync does not wipe FIB routes whose nexthops
    * FSDB has not resolved yet (e.g. a coordinated FSDB+bgpd restart). It is the
@@ -4473,7 +4494,6 @@ GrLoadResult PeerManagerBase::readGrState() const noexcept {
     lines.emplace_back(line);
   }
   grFile.close();
-  std::remove(FLAGS_gr_state_file.c_str());
 
   if (lines.size() < 2) {
     XLOGF(ERR, "Invalid lines size {}", lines.size());
