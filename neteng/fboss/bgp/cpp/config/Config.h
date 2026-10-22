@@ -60,8 +60,10 @@ class Config {
   explicit Config(
       thrift::BgpConfig config,
       std::optional<folly::F14NodeMap<folly::CIDRNetwork, int64_t>>
-          peerSubnetLbwMap = std::nullopt)
+          peerSubnetLbwMap = std::nullopt,
+      bool splitConfigPolicy = false)
       : config_(std::move(config)),
+        splitConfigPolicy_(splitConfigPolicy),
         peerSubnetLbwMap_(std::move(peerSubnetLbwMap)) {
     populateConfigDatabase();
   }

@@ -124,25 +124,31 @@ TEST_F(ConfigTestFixture, ConfigManagerBasicConstructionAndGetConfig) {
       defaultConfig_.local_as_4_byte());
 }
 
-TEST_F(ConfigTestFixture, ConfigManagerPreservesPlatformConfigType) {
+TEST_F(
+    ConfigTestFixture,
+    ConfigManagerPreservesPlatformTypeAndSplitPolicyMode) {
   {
-    auto initialConfig = std::make_shared<const ConfigBB>(defaultConfig_);
+    auto initialConfig =
+        std::make_shared<const ConfigBB>(defaultConfig_, std::nullopt, true);
     ConfigManager configManager(initialConfig);
 
     auto updatedConfig = configManager.addPeersToConfig({});
 
     EXPECT_NE(
         nullptr, std::dynamic_pointer_cast<const ConfigBB>(updatedConfig));
+    EXPECT_TRUE(updatedConfig->splitConfigPolicy());
   }
 
   {
-    auto initialConfig = std::make_shared<const ConfigDC>(defaultConfig_);
+    auto initialConfig =
+        std::make_shared<const ConfigDC>(defaultConfig_, std::nullopt, true);
     ConfigManager configManager(initialConfig);
 
     auto updatedConfig = configManager.removePeersFromConfig({});
 
     EXPECT_NE(
         nullptr, std::dynamic_pointer_cast<const ConfigDC>(updatedConfig));
+    EXPECT_TRUE(updatedConfig->splitConfigPolicy());
   }
 }
 
@@ -1319,6 +1325,11 @@ TEST_F(ConfigManagerFileTestFixture, SplitConfigPolicyFieldsStrippedFromFile) {
       createConfigManagerPolicyMap({{kPeerAddr3.str(), "UPDATED_POLICY", ""}});
   auto updatedConfig = configManager.updatePeerPolicies(*policyMap);
   ASSERT_NE(updatedConfig, nullptr);
+  ASSERT_TRUE(updatedConfig->splitConfigPolicy());
+  const auto loadedPolicy = apache::thrift::SimpleJSONSerializer::deserialize<
+      thrift::BgpPolicyConfig>(updatedConfig->getPolicyConfig());
+  EXPECT_EQ(*policyConfig.communities(), *loadedPolicy.communities());
+  EXPECT_EQ(*policyConfig.localprefs(), *loadedPolicy.localprefs());
 
   // Read written config file
   std::string fileContent;
@@ -1395,6 +1406,11 @@ TEST_F(
       createConfigManagerPolicyMap({{kPeerAddr3.str(), "UPDATED_POLICY", ""}});
   auto updatedConfig = configManager.updatePeerPolicies(*policyMap);
   ASSERT_NE(updatedConfig, nullptr);
+  ASSERT_TRUE(updatedConfig->splitConfigPolicy());
+  const auto loadedPolicy = apache::thrift::SimpleJSONSerializer::deserialize<
+      thrift::BgpPolicyConfig>(updatedConfig->getPolicyConfig());
+  EXPECT_EQ(*policyConfig.communities(), *loadedPolicy.communities());
+  EXPECT_EQ(*policyConfig.localprefs(), *loadedPolicy.localprefs());
 
   // Read written config file
   std::string fileContent;

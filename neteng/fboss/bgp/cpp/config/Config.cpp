@@ -217,7 +217,8 @@ std::shared_ptr<Config> Config::createConfigFromFile(
 
 std::shared_ptr<const Config> Config::createConfig(
     thrift::BgpConfig config) const {
-  return std::make_shared<const Config>(std::move(config));
+  return std::make_shared<const Config>(
+      std::move(config), std::nullopt, splitConfigPolicy());
 }
 
 // Create a policy manager from the given config.

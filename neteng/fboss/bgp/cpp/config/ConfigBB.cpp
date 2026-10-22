@@ -27,7 +27,8 @@ std::shared_ptr<Config> ConfigBB::createConfigFromFile(
 
 std::shared_ptr<const Config> ConfigBB::createConfig(
     thrift::BgpConfig config) const {
-  return std::make_shared<const ConfigBB>(std::move(config));
+  return std::make_shared<const ConfigBB>(
+      std::move(config), std::nullopt, splitConfigPolicy());
 }
 
 const std::shared_ptr<thrift::BgpNetServiceThriftConfig>
