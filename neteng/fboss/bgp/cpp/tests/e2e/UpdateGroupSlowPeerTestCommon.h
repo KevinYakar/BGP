@@ -81,14 +81,25 @@ class SlowPeerTestBase : public UpdateGroupDistributionTestBase {
 
   /*
    * Get the update group for a peer.
+   *
+   * Reads adjRibOutGroup_ on the PeerManagerBase event base (inline when
+   * already on it) so the read is serialized with evb writers such as the
+   * update-group split in processUpdateGroupsEgressPolicyReevaluation. An
+   * off-evb read of the shared_ptr races that write under TSan.
    */
   std::shared_ptr<AdjRibOutGroup> getUpdateGroupForPeer(
       const folly::IPAddress& peerAddr) {
-    auto adjRib = getAdjRib(peerAddr);
-    if (!adjRib) {
-      return nullptr;
+    auto read = [this, &peerAddr]() -> std::shared_ptr<AdjRibOutGroup> {
+      auto adjRib = getAdjRib(peerAddr);
+      return adjRib ? adjRib->getUpdateGroup() : nullptr;
+    };
+    if (!peerManager_) {
+      return read();
     }
-    return adjRib->getUpdateGroup();
+    std::shared_ptr<AdjRibOutGroup> group;
+    peerManager_->getEventBase().runImmediatelyOrRunInEventBaseThreadAndWait(
+        [&]() { group = read(); });
+    return group;
   }
 
   /*

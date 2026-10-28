@@ -438,6 +438,11 @@ class UpdateGroupPolicyReEvalE2EBase : public SlowPeerTestBase {
    * JOINED_RUNNING: unblock and drain its queue in a loop while yielding to the
    * evb, with a final drain to clear any leftover change-list messages. Mirrors
    * the DSP rejoin drain-while-waiting pattern (P2320590232 Pattern 1).
+   *
+   * Keep draining until the peer is JOINED_RUNNING with an empty queue on two
+   * consecutive rounds. A single JOINED_RUNNING observation is not enough: the
+   * group may still be sending (e.g. a just-split group's re-eval output), and
+   * those messages re-block a small queue once draining stops.
    */
   void unblockAndDrainToJoined(
       const folly::IPAddress& peerAddr,
@@ -445,13 +450,15 @@ class UpdateGroupPolicyReEvalE2EBase : public SlowPeerTestBase {
     /* Unblock without draining so recordDrainedRoutes captures every message.
      */
     unblockPeer(peerAddr, /*maxRetries=*/0);
-    for (int i = 0; i < 20; ++i) {
-      if (getPeerState(peerAddr) == PeerUpdateState::JOINED_RUNNING) {
-        break;
-      }
+    int settledRounds = 0;
+    for (int i = 0; i < 50 && settledRounds < 2; ++i) {
       recordDrainedRoutes(peerId, 1, 100);
       peerManager_->getEventBase().runInEventBaseThreadAndWait([]() {});
       folly::futures::sleep(std::chrono::milliseconds(100)).get();
+      const bool settled =
+          getPeerState(peerAddr) == PeerUpdateState::JOINED_RUNNING &&
+          getPeerQueueSize(peerId) == 0;
+      settledRounds = settled ? settledRounds + 1 : 0;
     }
     /* Final drain clears leftover CL messages before any post-rejoin verify. */
     recordDrainedRoutes(peerId, 1, 100);
