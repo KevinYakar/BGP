@@ -114,7 +114,7 @@ std::vector<NexthopStatus> NexthopCache::addOrUpdateNextHopStatus(
             isRegisteredFromRib);
 
         // Update the status while preserving the registration flag
-        currentStatus = nexthopStatus;
+        currentStatus = withNextEpoch(nexthopStatus);
 
         if (isReachabilityChanged) {
           if (nexthopStatus.isReachable()) {
@@ -143,7 +143,8 @@ std::vector<NexthopStatus> NexthopCache::addOrUpdateNextHopStatus(
                 : "unset");
 
         // Insert the new entry with registration flag set to false
-        statusMap.emplace(nexthopIp, std::make_tuple(nexthopStatus, false));
+        statusMap.emplace(
+            nexthopIp, std::make_tuple(withNextEpoch(nexthopStatus), false));
         RibStats::incrNexthopStatusMapCount();
 
         /*
@@ -205,7 +206,8 @@ NexthopStatus NexthopCache::registerAndGetNexthopStatus(
             nexthopIp.str());
 
         // Create a default NexthopStatus (unreachable, no IGP cost)
-        NexthopStatus defaultStatus(nexthopIp, false);
+        const auto defaultStatus =
+            withNextEpoch(NexthopStatus(nexthopIp, false));
 
         // Insert the new entry with registration flag set to true
         statusMap.emplace(nexthopIp, std::make_tuple(defaultStatus, true));
@@ -234,6 +236,20 @@ bool NexthopCache::isRegistered(const folly::IPAddress& nexthopIp) const {
           NexthopStatusWithRegistration>& statusMap) -> bool {
         auto it = statusMap.find(nexthopIp);
         return it != statusMap.end() && std::get<1>(it->second);
+      });
+}
+
+std::optional<NexthopStatus> NexthopCache::getNexthopStatus(
+    const folly::IPAddress& nexthopIp) const {
+  return nexthopStatusMap_.withRLock(
+      [&](const folly::
+              F14NodeMap<folly::IPAddress, NexthopStatusWithRegistration>&
+                  statusMap) -> std::optional<NexthopStatus> {
+        auto it = statusMap.find(nexthopIp);
+        if (it == statusMap.end()) {
+          return std::nullopt;
+        }
+        return std::get<0>(it->second);
       });
 }
 
@@ -281,8 +297,8 @@ std::optional<NexthopStatus> NexthopCache::clearConnectedStatus(
          * Reset to unreachable with isConnected unset so a non-connected source
          * (e.g. FsdbFibWatcher) can take over authority again.
          */
-        status = NexthopStatus(
-            nexthopIp, /*isReachable*/ false, std::nullopt, std::nullopt);
+        status = withNextEpoch(NexthopStatus(
+            nexthopIp, /*isReachable*/ false, std::nullopt, std::nullopt));
         if (wasReachable) {
           RibStats::incrNhtCacheNexthopUnreachable();
         }
@@ -292,6 +308,11 @@ std::optional<NexthopStatus> NexthopCache::clearConnectedStatus(
         }
         return std::nullopt;
       });
+}
+
+NexthopStatus NexthopCache::withNextEpoch(NexthopStatus status) {
+  status.epoch_ = ++lastEpoch_;
+  return status;
 }
 
 void NexthopCache::setOnNexthopRegistered(

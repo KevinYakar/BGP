@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <memory>
 
+#include <folly/Function.h>
 #include <folly/IPAddress.h>
 #include <folly/IntrusiveList.h>
 #include <folly/logging/xlog.h>
@@ -40,6 +41,8 @@ class PathSelectionPolicy;
 
 class RibEntry {
  public:
+  using UnlinkRouteInfoFn = folly::FunctionRef<bool(RouteInfo&)>;
+
   explicit RibEntry(const folly::CIDRNetwork& prefix) : prefix_(prefix) {}
 
   /*
@@ -262,19 +265,33 @@ class RibEntry {
     return ret;
   }
 
-  /*
-   * update routeInfos based on that peer
-   * return true if a new route is added
-   *             or an existing route is updated with new attributes
-   *        false if there's a same route with the same attributes exists
+  /**
+   * Add, replace, or withdraw one path for a peer and received path ID.
+   *
+   * Announcement (attrs is not null):
+   * - Add a new RouteInfo, or replace the existing one if its attributes
+   *   changed.
+   * - Link the new RouteInfo to nexthopInfo when provided.
+   * - On replacement, unlink the old RouteInfo from its NexthopInfo.
+   *
+   * Withdrawal (attrs is null):
+   * - Find the stored RouteInfo, unlink it from its NexthopInfo, and erase it.
+   *
+   * If a replacement or withdrawal removes a RouteInfo, unlinkRouteInfoFn
+   * unlinks it. RibBase passes a callback that also deletes the NexthopInfo
+   * when no route uses it. When no callback is provided, updatePath() only
+   * unlinks the RouteInfo from its NexthopInfo.
+   *
+   * @return true if a path was added, replaced, or withdrawn; false if no path
+   * changed.
    */
   bool updatePath(
       const TinyPeerInfo& peer,
       std::shared_ptr<const BgpPath> attrs,
       const bool installToFib = true,
       const uint32_t receivedPathId = kDefaultPathID,
-      std::optional<facebook::bgp::NexthopInfo*> nexthopInfo =
-          std::nullopt) noexcept;
+      std::optional<facebook::bgp::NexthopInfo*> nexthopInfo = std::nullopt,
+      UnlinkRouteInfoFn unlinkRouteInfoFn = {}) noexcept;
 
   /*
    * Path selection (selectBestPath + 7 phase helpers + PathSelectionInput /
@@ -490,14 +507,14 @@ class RibEntry {
   /**
    * @brief Helper method to unlink a RouteInfo from a NexthopInfo
    *
-   * @param peerId The peer ID
-   * @param receivedPathId The path ID
-   * @param nexthopInfo Optional pointer to the NexthopInfo
+   * @param routeInfo The RouteInfo to unlink
+   * @param unlinkRouteInfoFn Optional callback that unlinks the RouteInfo
+   * instead. RibBase passes a callback that also deletes the NexthopInfo when
+   * no route uses it.
    */
   void unlinkRouteInfoFromNexthop(
-      const nettools::bgplib::BgpPeerId& peerId,
-      const uint32_t receivedPathId,
-      std::optional<facebook::bgp::NexthopInfo*> nexthopInfo);
+      RouteInfo& routeInfo,
+      UnlinkRouteInfoFn unlinkRouteInfoFn);
 
   /**
    * @brief Helper method to link a RouteInfo to a NexthopInfo

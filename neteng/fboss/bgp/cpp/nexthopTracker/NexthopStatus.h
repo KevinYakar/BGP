@@ -151,7 +151,18 @@ class NexthopStatus {
         (igpCost_.has_value() || !excludeNexthopWithoutCost_);
   }
 
+  /**
+   * @brief Get the epoch of the NexthopCache write that stored this status.
+   * @return A number that NexthopCache increments on every write. A larger
+   * epoch means a later write. 0 means NexthopCache did not store this status.
+   */
+  uint64_t getEpoch() const {
+    return epoch_;
+  }
+
  private:
+  friend class NexthopCache;
+
   // v4 or v6 nexthop prefix
   folly::IPAddress nexthop_;
 
@@ -192,6 +203,11 @@ class NexthopStatus {
    * for every other nexthop source.
    */
   std::optional<std::string> ifName_;
+
+  /*
+   * Set only by NexthopCache, on every write. See getEpoch().
+   */
+  uint64_t epoch_{0};
 };
 
 /**

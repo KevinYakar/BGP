@@ -662,4 +662,108 @@ TEST_F(NexthopCacheTestFixture, OnNexthopRegisteredHook) {
   EXPECT_EQ(fired[3], unreachableIp);
 }
 
+namespace {
+constexpr uint64_t kNoEpoch{0};
+} // namespace
+
+/*
+ * Every write gets a larger epoch than the write before it, across nexthops.
+ * The status returned for the RIB carries the epoch of its own write.
+ */
+TEST_F(NexthopCacheTestFixture, EpochIncreasesOnEveryWrite) {
+  const folly::IPAddress a("10.0.0.1");
+  const folly::IPAddress b("10.0.0.2");
+
+  cache_->addOrUpdateNextHopStatus({NexthopStatus(a, true, 10)});
+  const auto epochA = cache_->registerAndGetNexthopStatus(a).getEpoch();
+  cache_->addOrUpdateNextHopStatus({NexthopStatus(b, true, 10)});
+  const auto epochB = cache_->getNexthopStatus(b).value().getEpoch();
+  const auto pushed =
+      cache_->addOrUpdateNextHopStatus({NexthopStatus(a, true, 20)});
+
+  ASSERT_EQ(1, pushed.size());
+  EXPECT_NE(kNoEpoch, epochA);
+  EXPECT_GT(epochB, epochA);
+  EXPECT_GT(pushed.front().getEpoch(), epochB);
+  EXPECT_EQ(
+      pushed.front().getEpoch(),
+      cache_->getNexthopStatus(a).value().getEpoch());
+}
+
+/*
+ * Calls that leave the stored status unchanged keep its epoch: a duplicate
+ * status, an update that source priority blocks, and registration.
+ */
+TEST_F(NexthopCacheTestFixture, EpochUnchangedWithoutWrite) {
+  const folly::IPAddress connected("10.0.0.3");
+  cache_->addOrUpdateNextHopStatus({NexthopStatus(connected, true, 1, true)});
+  const auto epoch = cache_->registerAndGetNexthopStatus(connected).getEpoch();
+
+  EXPECT_TRUE(
+      cache_
+          ->addOrUpdateNextHopStatus({NexthopStatus(connected, true, 1, true)})
+          .empty());
+  EXPECT_TRUE(
+      cache_->addOrUpdateNextHopStatus({NexthopStatus(connected, false)})
+          .empty());
+  cache_->registerAndGetNexthopStatus(connected);
+
+  EXPECT_NE(kNoEpoch, epoch);
+  EXPECT_EQ(epoch, cache_->getNexthopStatus(connected).value().getEpoch());
+}
+
+/*
+ * Removing an unreachable nexthop and creating it again gives a larger epoch,
+ * so an update queued before the removal is never newer than the new entry.
+ */
+TEST_F(NexthopCacheTestFixture, RecreatedEntryGetsLargerEpoch) {
+  const folly::IPAddress ip("10.0.0.4");
+  const auto oldEpoch = cache_->registerAndGetNexthopStatus(ip).getEpoch();
+  ASSERT_TRUE(cache_->unregisterAndRemoveNexthopStatus(ip));
+
+  const auto newEpoch = cache_->registerAndGetNexthopStatus(ip).getEpoch();
+
+  EXPECT_NE(kNoEpoch, oldEpoch);
+  EXPECT_GT(newEpoch, oldEpoch);
+}
+
+/*
+ * clearConnectedStatus is a write. The stored status and the returned status
+ * both carry its new epoch.
+ */
+TEST_F(NexthopCacheTestFixture, ClearConnectedStatusAdvancesEpoch) {
+  const folly::IPAddress ip("10.0.0.5");
+  cache_->addOrUpdateNextHopStatus({NexthopStatus(ip, true, 1, true)});
+  const auto oldEpoch = cache_->registerAndGetNexthopStatus(ip).getEpoch();
+
+  const auto cleared = cache_->clearConnectedStatus(ip);
+
+  ASSERT_TRUE(cleared.has_value());
+  EXPECT_GT(cleared->getEpoch(), oldEpoch);
+  EXPECT_EQ(
+      cleared->getEpoch(), cache_->getNexthopStatus(ip).value().getEpoch());
+}
+
+/*
+ * registerAndGetNexthopStatus returns the stored epoch, both when it creates
+ * the entry and when the entry already exists.
+ */
+TEST_F(NexthopCacheTestFixture, RegisterAndGetReturnsStoredEpoch) {
+  const folly::IPAddress created("10.0.0.6");
+  const folly::IPAddress existing("10.0.0.7");
+  cache_->addOrUpdateNextHopStatus({NexthopStatus(existing, true, 10)});
+
+  const auto createdStatus = cache_->registerAndGetNexthopStatus(created);
+  const auto existingStatus = cache_->registerAndGetNexthopStatus(existing);
+
+  EXPECT_NE(kNoEpoch, createdStatus.getEpoch());
+  EXPECT_EQ(
+      createdStatus.getEpoch(),
+      cache_->getNexthopStatus(created).value().getEpoch());
+  EXPECT_NE(kNoEpoch, existingStatus.getEpoch());
+  EXPECT_EQ(
+      existingStatus.getEpoch(),
+      cache_->getNexthopStatus(existing).value().getEpoch());
+}
+
 } // namespace facebook::bgp

@@ -441,8 +441,6 @@ class RibFixture : public testing::Test {
   // Send message to resume best path and FIB programming
   void sendResumeBestPathAndFibProgramming(
       RibPauseResumeCause ribPauseResumeCause);
-  // Send message to notify Rib of updated nexthops
-  void sendNexthopUpdate(RibInNexthopUpdate nexthopUpdate);
   // Send NexthopResolutionUpdate for conditional local route origination
   void sendNexthopResolutionUpdate(NexthopResolutionUpdate nexthopResUpdate);
   void runLbwCommunityBestPathTest(bool computeUcmpFromLbwComm);

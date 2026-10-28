@@ -115,8 +115,9 @@ struct ResumeBestPathAndFibProgramming {
  * @brief Message to convey changes or additions to directly connected nexthops
  * or remote nexthops
  * @details This message is sent to Rib from the nexthopHandler thread
- * @param nexthopStatuses: Vector of NexthopStatus objects containing nexthop IP
- * addresses and their status
+ * @param nexthopStatuses: Statuses that NexthopCache reported as changed. The
+ * RIB reads the nexthop IP and the epoch, and takes the status from
+ * NexthopCache.
  */
 struct RibInNexthopUpdate {
   const std::vector<NexthopStatus> nexthopStatuses;

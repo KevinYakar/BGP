@@ -1123,37 +1123,24 @@ class RibBase : public BgpModuleBase, public MonitoredModule {
   bool isRouteChurnDetected() noexcept;
 
   /**
-   * Helper method to get a NexthopInfo for a given nexthop or find it
-   * based on route info.
+   * Helper method to get a NexthopInfo for a given nexthop.
    *
-   * For announcements (attrs is not null):
-   * - If the nexthop is not in the nexthopInfoMap_, it will get the status from
-   *   nexthopCache_ and create a new NexthopInfo in the map.
+   * If the nexthop is not in nexthopInfoMap_, it will get the status from
+   * nexthopCache_ and create a new NexthopInfo in the map.
    *
-   * For withdrawals (attrs is null):
-   * - It will find the RouteInfo to get its nexthop, and then find the
-   * NexthopInfo for that nexthop.
-   *
-   * @param attrs The route attributes (null for withdrawals)
-   * @param peer The peer information
-   * @param entry The RibEntry
-   * @param receivedPathId The path ID
-   * @return A pointer to the NexthopInfo for the nexthop, or nullptr if not
-   * found
+   * @param attrs The route attributes for an announcement
+   * @return A pointer to the NexthopInfo for the nexthop, or nullptr if the
+   * nexthop should not be tracked
    */
-  NexthopInfo* FOLLY_NULLABLE getNexthopInfo(
-      const std::shared_ptr<const BgpPath>& attrs,
-      const TinyPeerInfo& peer,
-      const RibEntry& entry,
-      const uint32_t receivedPathId);
+  NexthopInfo* FOLLY_NULLABLE getNexthopInfo(const BgpPath& attrs);
 
   /**
    * @brief Helper method to check if a NexthopInfo should be deleted from
-  nexthopInfoMap_ and nexthopCache. This is executed
-   * only for withdrawals when enableNexthopTracking_ is true.
+   * nexthopInfoMap_ and nexthopCache. This is executed
+   * after a RouteInfo is unlinked when enableNexthopTracking_ is true.
    *
    * @details NexthopInfo will be deleted from nexthopInfoMap_ if no routeInfo
-  objects are associated with it.
+   * objects are associated with it.
    * NexthopInfo will be deleted from nexthopCache ONLY if the nexthop is
    * unreachable.
    *
@@ -1161,6 +1148,15 @@ class RibBase : public BgpModuleBase, public MonitoredModule {
    * @return True if the NexthopInfo was deleted, false otherwise
    */
   bool checkAndDeleteNexthopInfo(const folly::IPAddress& nexthop);
+
+  /**
+   * @brief Unlink a RouteInfo from its NexthopInfo, then call
+   * checkAndDeleteNexthopInfo() for that nexthop.
+   *
+   * @param routeInfo The RouteInfo to unlink
+   * @return True if the RouteInfo was linked to a NexthopInfo, false otherwise
+   */
+  bool unlinkRouteInfoAndCleanupNexthop(RouteInfo& routeInfo);
 
   /*
    * Member variables

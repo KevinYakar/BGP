@@ -108,6 +108,13 @@ class NexthopCache {
   bool isRegistered(const folly::IPAddress& nexthopIp) const;
 
   /**
+   * @brief Returns the cached status of a nexthop without registering it, or
+   *        std::nullopt if the nexthop is not in the cache.
+   */
+  std::optional<NexthopStatus> getNexthopStatus(
+      const folly::IPAddress& nexthopIp) const;
+
+  /**
    * @brief Returns the IPs of all RIB-registered nexthops that fall within the
    *        given prefix (address families matched).
    *
@@ -163,12 +170,28 @@ class NexthopCache {
    *              NeighborWatcher (isConnected=true) is authoritative for
    *              directly connected nexthops.
    *
-   * Read calls: BGP Rib thread reads the nexthopStatuses for best-path
-   *             computations via registerAndGetNexthopStatus().
+   * Read calls: the RIB thread reads a status via
+   *             registerAndGetNexthopStatus() when it creates a NexthopInfo,
+   *             and via getNexthopStatus() when it processes a
+   *             RibInNexthopUpdate.
    **/
   folly::Synchronized<
       folly::F14NodeMap<folly::IPAddress, NexthopStatusWithRegistration>>
       nexthopStatusMap_;
+
+  /*
+   * Epoch of the latest write to nexthopStatusMap_. Used only under the
+   * nexthopStatusMap_ write lock. It is never reset, so a status created again
+   * after an erase still gets a larger epoch.
+   */
+  uint64_t lastEpoch_{0};
+
+  /*
+   * Returns the status stamped with the epoch of a new write. Every status
+   * stored in nexthopStatusMap_ goes through this. The caller must hold the
+   * nexthopStatusMap_ write lock.
+   */
+  NexthopStatus withNextEpoch(NexthopStatus status);
 
   /*
    * Hook fired (outside the map lock) from registerAndGetNexthopStatus when a

@@ -621,6 +621,12 @@ inline const auto kNhtCacheNexthopUnreachable =
 DECLARE_timeseries(nhtCacheNexthopUnreachable);
 void incrNhtCacheNexthopUnreachable();
 
+// Queued nexthop updates the RIB skipped because it already read a newer status
+inline const auto kNhtRibStaleUpdateSkipped =
+    fmt::format("{}.nht.rib.stale_update_skipped", kBgpcppTag);
+DECLARE_timeseries(nhtRibStaleUpdateSkipped);
+void incrNhtRibStaleUpdateSkipped();
+
 // Average batch size of fibBatchList_ at each flush
 inline const auto kFibBatchListSize =
     fmt::format("{}.rib.fib_batch_list.size", kBgpcppTag);

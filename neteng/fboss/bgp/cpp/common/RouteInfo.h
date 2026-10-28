@@ -72,6 +72,10 @@ inline std::ostream& operator<<(
 struct RouteInfo : nettools::edge::RouteBase {
   const folly::CIDRNetwork prefix; // v4 or v6 prefix
   const TinyPeerInfo peer;
+  /*
+   * Never null. A RouteInfo is built only for an announced path, and the
+   * constructor checks attrs->isPublished().
+   */
   const std::shared_ptr<const BgpPath> attrs;
   const uint32_t receivedPathId;
   // only has a value when this path has been selected in best path selection
@@ -154,7 +158,7 @@ struct RouteInfo : nettools::edge::RouteBase {
   folly::SafeIntrusiveListHook nextHopListHook_;
   bool isOnNextHopList() const;
   void setNexthopInfo(NexthopInfoBase* nexthopInfo);
-  void unlinkFromNexthopInfo() noexcept;
+  bool unlinkFromNexthopInfo() noexcept;
   bool isNexthopReachable() const;
   bool hasIgpCost() const;
   /* Whether this route's nexthop is resolved for best-path selection. */

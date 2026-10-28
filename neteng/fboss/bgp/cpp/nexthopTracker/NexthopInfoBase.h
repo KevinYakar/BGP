@@ -67,7 +67,7 @@ class NexthopInfoBase {
    */
   virtual bool isResolvedForSelection() const = 0;
 
-  virtual void unlinkRouteInfo(RouteInfo& routeInfo) noexcept = 0;
+  virtual bool unlinkRouteInfo(RouteInfo& routeInfo) noexcept = 0;
 };
 
 } // namespace facebook::bgp

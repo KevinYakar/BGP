@@ -873,19 +873,21 @@ RibBase::processSingleRibInUpdate(
 
   NexthopInfo* nexthopInfo = nullptr;
   // update new path to the entry.
-  if (enableNexthopTracking_) {
+  if (enableNexthopTracking_ && attrs) {
     // Find the nexthop and associated NexthopInfo
     XCHECK(nexthopCache_) << "nexthopCache_ is null, this is not expected";
-    nexthopInfo = getNexthopInfo(attrs, peer, entry, receivedPathId);
+    nexthopInfo = getNexthopInfo(*attrs);
   }
 
-  // Pass the NexthopInfo pointer to updatePath
   entry.updatePath(
       peer,
       attrs,
       installToFib,
       receivedPathId,
-      nexthopInfo ? std::make_optional(nexthopInfo) : std::nullopt);
+      nexthopInfo ? std::make_optional(nexthopInfo) : std::nullopt,
+      [this](RouteInfo& routeInfo) {
+        return unlinkRouteInfoAndCleanupNexthop(routeInfo);
+      });
 
   /*
    * Get new path counts now. entry will be gone out of scope if
@@ -913,16 +915,6 @@ RibBase::processSingleRibInUpdate(
       "Finish updating RibEntry of prefix {} from peer [{}]",
       folly::IPAddress::networkToString(prefix),
       BgpPeerId{peer.addr, peer.routerId}.str());
-
-  if (enableNexthopTracking_) {
-    /*
-     * On withdrawals, check if the nexthopInfo can be deleted from the
-     * nexthopInfoMap_
-     */
-    if (!attrs && nexthopInfo != nullptr) {
-      checkAndDeleteNexthopInfo(nexthopInfo->getNextHop());
-    }
-  }
 
   /*
    * If route is configured with minimum_supporting_routes > 0, do not
@@ -1303,17 +1295,46 @@ void RibBase::processRibInNexthopUpdate(
   std::vector<std::string> triggeringNexthops;
 
   // Process each NexthopStatus in the update
-  for (const auto& nexthopStatus : nexthopUpdate.nexthopStatuses) {
-    const auto& nexthopIp = nexthopStatus.getNexthop();
+  for (const auto& queuedStatus : nexthopUpdate.nexthopStatuses) {
+    const auto& nexthopIp = queuedStatus.getNexthop();
     XLOGF(DBG2, "Processing nexthop update for {}", nexthopIp.str());
-
-    const bool isReachable = nexthopStatus.isReachable();
-    const std::optional<uint32_t> igpCost = nexthopStatus.getIgpCost();
-    const bool isResolved = nexthopStatus.isResolvedForSelection();
 
     // Check if the nexthop exists in nexthopInfoMap_
     auto it = nexthopInfoMap_.find(nexthopIp);
     if (it != nexthopInfoMap_.end()) {
+      /*
+       * Skip an update older than the status the NexthopInfo already holds.
+       * An equal epoch is re-read. Epoch 0 means NexthopCache did not stamp
+       * the update, so it is always re-read.
+       */
+      if (queuedStatus.getEpoch() != 0 &&
+          it->second.getEpoch() > queuedStatus.getEpoch()) {
+        XLOGF(
+            DBG2,
+            "Skipping stale nexthop update for {}: epoch {} is older than {}",
+            nexthopIp.str(),
+            queuedStatus.getEpoch(),
+            it->second.getEpoch());
+        RibStats::incrNhtRibStaleUpdateSkipped();
+        continue;
+      }
+      /*
+       * The update names a nexthop whose status changed. The NexthopInfo takes
+       * the current status from NexthopCache, not the status in the update.
+       */
+      const auto cachedStatus = nexthopCache_->getNexthopStatus(nexthopIp);
+      if (!cachedStatus.has_value()) {
+        XLOGF(
+            ERR,
+            "Ignoring nexthop update for {}: RIB has a NexthopInfo but NexthopCache has no entry. The RIB keeps the old status.",
+            nexthopIp.str());
+        continue;
+      }
+      const NexthopStatus& nexthopStatus = *cachedStatus;
+      const bool isReachable = nexthopStatus.isReachable();
+      const std::optional<uint32_t> igpCost = nexthopStatus.getIgpCost();
+      const bool isResolved = nexthopStatus.isResolvedForSelection();
+
       // Update the existing NexthopInfo
       const bool isReachabilityChanged =
           it->second.isReachable() != isReachable;
@@ -3405,130 +3426,105 @@ void RibBase::appendRibPolicyChangeHistory(
   }
 }
 
-NexthopInfo* FOLLY_NULLABLE RibBase::getNexthopInfo(
-    const std::shared_ptr<const BgpPath>& attrs,
-    const TinyPeerInfo& peer,
-    const RibEntry& entry,
-    const uint32_t receivedPathId) {
+NexthopInfo* FOLLY_NULLABLE RibBase::getNexthopInfo(const BgpPath& attrs) {
   XCHECK(nexthopCache_)
       << "nexthopCache_ must not be null when nexthop tracking is enabled";
 
-  // For announcements, get or create the NexthopInfo
-  if (attrs) {
-    const auto& nexthop = attrs->getNexthop();
-    /*
-     * Skip the unspecified nexthop (::/0.0.0.0). Locally-originated and
-     * aggregate routes (via kV4LocalPeerInfo) carry this next-hop-self
-     * placeholder: it is never a resolvable FSDB FIB entry, is never subscribed
-     * for tracking, and never gates selection (local routes are always
-     * isResolvedForSelection()). Registering it would leave a permanently
-     * unreachable NexthopInfo that never resolves -- which would stall the
-     * initial-path-computation nexthop-resolution gate
-     * (areAllRegisteredNexthopsResolved). Conditional local routes carry a
-     * real, non-zero nexthop and remain tracked.
-     */
-    if (nexthop.isZero()) {
-      return nullptr;
-    }
-    auto it = nexthopInfoMap_.find(nexthop);
-    if (it != nexthopInfoMap_.end()) {
-      XLOGF(
-          DBG2,
-          "Found existing NexthopInfo for nexthop {} (reachable: {}, igpCost: {})",
-          nexthop.str(),
-          it->second.isReachable(),
-          it->second.getIgpCost().has_value()
-              ? std::to_string(it->second.getIgpCost().value())
-              : "unset");
-      return &it->second;
-    }
-
-    /*
-     * Get nexthop status from nexthopCache
-     * nexthopCache will always return a NexthopStatus, creating a new one with
-     * default values if needed
-     */
-    auto nextHopStatus = nexthopCache_->registerAndGetNexthopStatus(nexthop);
-    auto isReachable = nextHopStatus.isReachable();
-    auto igpCost = nextHopStatus.getIgpCost();
-    std::optional<bool> isConnected = nextHopStatus.isConnected();
-
-    XLOGF(
-        DBG2,
-        "Retrieved nexthop status from nexthopCache for {}: reachable={}, igpCost={}, isConnected={}",
-        nexthop.str(),
-        isReachable,
-        igpCost.has_value() ? std::to_string(igpCost.value()) : "unset",
-        isConnected.has_value() ? std::to_string(isConnected.value())
-                                : "unset");
-
-    /*
-     * Create new NexthopInfo with the status. Use the cached status directly
-     * rather than reconstructing from individual fields, so the
-     * excludeNexthopWithoutCost policy carried on the NexthopStatus is
-     * preserved (the FBOSS source hardcodes it false).
-     */
-    auto [newIt, inserted] =
-        nexthopInfoMap_.emplace(nexthop, NexthopInfo(nextHopStatus));
-    if (inserted) {
-      RibStats::incrNexthopInfoCount();
-      if (!nextHopStatus.isResolvedForSelection()) {
-        ribCounters_.incrementUnresolvableNexthopCount();
-      }
-    }
-
-    XLOGF(
-        INFO,
-        "Created new NexthopInfo for nexthop {} (reachable: {}, igpCost: {}, isConnected: {})",
-        nexthop.str(),
-        isReachable,
-        igpCost.has_value() ? std::to_string(igpCost.value()) : "unset",
-        isConnected.has_value() ? std::to_string(isConnected.value())
-                                : "unset");
-
-    /*
-     * First time this nexthop is seen in RIB-IN: queue it for FSDB tracking
-     * (de-duped via requestedNexthops_). Flushed per RIB-IN batch. The
-     * unspecified nexthop (::/0.0.0.0) never reaches here -- it is skipped
-     * above and never registered/tracked.
-     */
-    if (nexthopSubscribeRequester_) {
-      /*
-       * Only when RIB-IN-driven tracking is enabled (DC). On EBB the requester
-       * is unset, so the checks below are skipped entirely.
-       */
-      if (requestedNexthops_.insert(nexthop).second) {
-        pendingNexthopSubscriptions_.push_back(nexthop);
-      }
-    }
-
-    return &newIt->second;
-  }
-  // For withdrawals, find the RouteInfo to get its nexthop
-  else {
-    auto peerId = BgpPeerId{peer.addr, peer.routerId};
-    auto routeInfo = entry.getRouteInfo(peerId, receivedPathId);
-
-    if (routeInfo) {
-      const auto& nexthop = routeInfo->attrs->getNexthop();
-
-      // Find the NexthopInfo for this nexthop
-      auto it = nexthopInfoMap_.find(nexthop);
-      if (it != nexthopInfoMap_.end()) {
-        XLOGF(
-            DBG2,
-            "Found existing NexthopInfo for withdrawal with nexthop {}",
-            nexthop.str());
-        return &it->second;
-      }
-      XLOGF(
-          DBG2,
-          "No NexthopInfo found for withdrawal with nexthop {}",
-          nexthop.str());
-    }
-
+  const auto& nexthop = attrs.getNexthop();
+  /*
+   * Skip the unspecified nexthop (::/0.0.0.0). Locally-originated and
+   * aggregate routes (via kV4LocalPeerInfo) carry this next-hop-self
+   * placeholder: it is never a resolvable FSDB FIB entry, is never subscribed
+   * for tracking, and never gates selection (local routes are always
+   * isResolvedForSelection()). Registering it would leave a permanently
+   * unreachable NexthopInfo that never resolves -- which would stall the
+   * initial-path-computation nexthop-resolution gate
+   * (areAllRegisteredNexthopsResolved). Conditional local routes carry a
+   * real, non-zero nexthop and remain tracked.
+   */
+  if (nexthop.isZero()) {
     return nullptr;
   }
+  auto it = nexthopInfoMap_.find(nexthop);
+  if (it != nexthopInfoMap_.end()) {
+    XLOGF(
+        DBG2,
+        "Found existing NexthopInfo for nexthop {} (reachable: {}, igpCost: {})",
+        nexthop.str(),
+        it->second.isReachable(),
+        it->second.getIgpCost().has_value()
+            ? std::to_string(it->second.getIgpCost().value())
+            : "unset");
+    return &it->second;
+  }
+
+  /*
+   * Get nexthop status from nexthopCache
+   * nexthopCache will always return a NexthopStatus, creating a new one with
+   * default values if needed
+   */
+  auto nextHopStatus = nexthopCache_->registerAndGetNexthopStatus(nexthop);
+  const bool isReachable = nextHopStatus.isReachable();
+  const auto igpCost = nextHopStatus.getIgpCost();
+  const std::optional<bool> isConnected = nextHopStatus.isConnected();
+
+  XLOGF(
+      DBG2,
+      "Retrieved nexthop status from nexthopCache for {}: reachable={}, igpCost={}, isConnected={}",
+      nexthop.str(),
+      isReachable,
+      igpCost.has_value() ? std::to_string(igpCost.value()) : "unset",
+      isConnected.has_value() ? std::to_string(isConnected.value()) : "unset");
+
+  /*
+   * Create new NexthopInfo with the status. Use the cached status directly
+   * rather than reconstructing from individual fields, so the
+   * excludeNexthopWithoutCost policy carried on the NexthopStatus is
+   * preserved (the FBOSS source hardcodes it false).
+   */
+  auto [newIt, inserted] =
+      nexthopInfoMap_.emplace(nexthop, NexthopInfo(nextHopStatus));
+  if (inserted) {
+    RibStats::incrNexthopInfoCount();
+    if (!nextHopStatus.isResolvedForSelection()) {
+      ribCounters_.incrementUnresolvableNexthopCount();
+    }
+  }
+
+  XLOGF(
+      INFO,
+      "Created new NexthopInfo for nexthop {} (reachable: {}, igpCost: {}, isConnected: {})",
+      nexthop.str(),
+      isReachable,
+      igpCost.has_value() ? std::to_string(igpCost.value()) : "unset",
+      isConnected.has_value() ? std::to_string(isConnected.value()) : "unset");
+
+  /*
+   * First time this nexthop is seen in RIB-IN: queue it for FSDB tracking
+   * (de-duped via requestedNexthops_). Flushed per RIB-IN batch. The
+   * unspecified nexthop (::/0.0.0.0) never reaches here -- it is skipped
+   * above and never registered/tracked.
+   */
+  if (nexthopSubscribeRequester_) {
+    /*
+     * Only when RIB-IN-driven tracking is enabled (DC). On EBB the requester
+     * is unset, so the checks below are skipped entirely.
+     */
+    if (requestedNexthops_.insert(nexthop).second) {
+      pendingNexthopSubscriptions_.push_back(nexthop);
+    }
+  }
+
+  return &newIt->second;
+}
+
+bool RibBase::unlinkRouteInfoAndCleanupNexthop(RouteInfo& routeInfo) {
+  const auto nexthop = routeInfo.attrs->getNexthop();
+  if (!routeInfo.unlinkFromNexthopInfo()) {
+    return false;
+  }
+  checkAndDeleteNexthopInfo(nexthop);
+  return true;
 }
 
 bool RibBase::checkAndDeleteNexthopInfo(const folly::IPAddress& nexthop) {

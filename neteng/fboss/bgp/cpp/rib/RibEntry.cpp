@@ -38,30 +38,34 @@ bool RibEntry::updatePath(
     shared_ptr<const BgpPath> attrs,
     const bool installToFib,
     const uint32_t receivedPathId,
-    std::optional<facebook::bgp::NexthopInfo*> nexthopInfo) noexcept {
+    std::optional<facebook::bgp::NexthopInfo*> nexthopInfo,
+    UnlinkRouteInfoFn unlinkRouteInfoFn) noexcept {
   nettools::bgplib::BgpPeerId peerId{peer.addr, peer.routerId};
   // withdrawn path
   if (!attrs) {
-    if (routeInfos_.find(peerId) != routeInfos_.end()) {
-      // nexthopInfo is present only when enableNexthopTracking is set to True
-      if (nexthopInfo.has_value() && nexthopInfo.value() != nullptr) {
-        unlinkRouteInfoFromNexthop(peerId, receivedPathId, *nexthopInfo);
-      }
-      auto ret = routeInfos_[peerId].erase(receivedPathId);
-      allPathsCount_ -= ret;
-      needPathSelection_ |= ret;
-      if (routeInfos_[peerId].empty()) {
-        RibStats::decrRibPaths();
-        routeInfos_.erase(peerId);
-      }
-      return ret;
+    auto peerIt = routeInfos_.find(peerId);
+    if (peerIt == routeInfos_.end()) {
+      return false;
     }
-    return false;
+    auto routeInfoIt = peerIt->second.find(receivedPathId);
+    if (routeInfoIt == peerIt->second.end()) {
+      return false;
+    }
+    unlinkRouteInfoFromNexthop(*routeInfoIt->second, unlinkRouteInfoFn);
+    peerIt->second.erase(routeInfoIt);
+    --allPathsCount_;
+    needPathSelection_ = true;
+    if (peerIt->second.empty()) {
+      RibStats::decrRibPaths();
+      routeInfos_.erase(peerIt);
+    }
+    return true;
   }
 
   // announced path
   auto iter = routeInfos_.find(peerId);
   std::optional<uint32_t> pathIdToSend = std::nullopt;
+  std::shared_ptr<RouteInfo>* routeInfoToReplace{nullptr};
 
   // attributes did not change, no need for update
   if (iter != routeInfos_.end()) {
@@ -72,6 +76,7 @@ bool RibEntry::updatePath(
       }
       // otherwise, proceed with update. Re-use allocated pathID
       pathIdToSend = pathIt->second->pathIdToSend;
+      routeInfoToReplace = &pathIt->second;
     }
   }
 
@@ -82,7 +87,11 @@ bool RibEntry::updatePath(
   // Link the RouteInfo to the NexthopInfo if provided
   linkRouteInfoToNexthop(*routeInfo, nexthopInfo);
 
-  if (iter == routeInfos_.end()) {
+  if (routeInfoToReplace != nullptr) {
+    auto replacedRouteInfo = std::move(*routeInfoToReplace);
+    *routeInfoToReplace = std::move(routeInfo);
+    unlinkRouteInfoFromNexthop(*replacedRouteInfo, unlinkRouteInfoFn);
+  } else if (iter == routeInfos_.end()) {
     folly::F14NodeMap<uint32_t, std::shared_ptr<RouteInfo>> info{
         {receivedPathId, std::move(routeInfo)}};
     // first time receive a route from peer for this prefix
@@ -132,26 +141,19 @@ void RibEntry::overrideWeightedNexthops(WeightedNexthopMap& weigtedNexthops) {
 }
 
 void RibEntry::unlinkRouteInfoFromNexthop(
-    const nettools::bgplib::BgpPeerId& peerId,
-    const uint32_t receivedPathId,
-    std::optional<facebook::bgp::NexthopInfo*> nexthopInfo) {
-  // Only proceed if nexthopInfo is valid
-  if (!nexthopInfo.has_value() || *nexthopInfo == nullptr) {
+    RouteInfo& routeInfo,
+    UnlinkRouteInfoFn unlinkRouteInfoFn) {
+  const bool unlinked = unlinkRouteInfoFn ? unlinkRouteInfoFn(routeInfo)
+                                          : routeInfo.unlinkFromNexthopInfo();
+  if (!unlinked) {
     return;
   }
-
-  // Get the routeInfo before erasing it
-  auto routeInfoIter = routeInfos_[peerId].find(receivedPathId);
-  if (routeInfoIter != routeInfos_[peerId].end()) {
-    auto& routeInfo = routeInfoIter->second;
-    // Unlink the RouteInfo from the NexthopInfo
-    (*nexthopInfo)->unlinkRouteInfo(*routeInfo);
-    XLOGF(
-        DBG2,
-        "Unlinked RouteInfo for prefix {} from NexthopInfo for {}",
-        folly::IPAddress::networkToString(prefix_),
-        (*nexthopInfo)->getNextHop().str());
-  }
+  const auto nexthop = routeInfo.attrs->getNexthop();
+  XLOGF(
+      DBG2,
+      "Unlinked RouteInfo for prefix {} from NexthopInfo for {}",
+      folly::IPAddress::networkToString(prefix_),
+      nexthop.str());
 }
 
 void RibEntry::linkRouteInfoToNexthop(

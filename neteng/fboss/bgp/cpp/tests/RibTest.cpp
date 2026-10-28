@@ -80,6 +80,8 @@
   FRIEND_TEST(                                                                 \
       RibNexthopTrackingFixture, RibInAnnouncementWithNexthopTracking);        \
   FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture, PathUpdatesMaintainNexthopAssociations);      \
+  FRIEND_TEST(                                                                 \
       RibNexthopTrackingFixture,                                               \
       RibInAnnouncementRequestsNexthopSubscription);                           \
   FRIEND_TEST(RibNexthopTrackingFixture, RibInNexthopUpdate);                  \
@@ -90,6 +92,24 @@
   FRIEND_TEST(                                                                 \
       RibNexthopTrackingFixture,                                               \
       StaleQueuedNexthopUpdateDoesNotRecreateUntrackedState);                  \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture,                                               \
+      QueuedUnreachableUpdateDoesNotOverwriteReregisteredStatus);              \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture,                                               \
+      QueuedReachableUpdateDoesNotOverwriteReregisteredStatus);                \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture,                                               \
+      OutOfOrderNexthopUpdatesUseLatestCachedStatus);                          \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture, StaleNexthopUpdateIsSkippedAndCounted);       \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture, NexthopUpdatesForTwoNexthopsApplyOutOfOrder); \
+  FRIEND_TEST(RibNexthopTrackingFixture, UnstampedNexthopUpdateAlwaysRereads); \
+  FRIEND_TEST(RibNexthopTrackingFixture, NexthopUpdateWithEqualEpochRereads);  \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture,                                               \
+      SkippedNexthopUpdateStillRunsInitialPathComputation);                    \
   FRIEND_TEST(RibNexthopTrackingFixture, RouteInfoStoresRibEntryPointer);      \
   FRIEND_TEST(RibNexthopTrackingFixture, RouteFlappingWithUniqueNexthop);      \
   FRIEND_TEST(RibNexthopTrackingFixture, GetNexthopInfoForNexthop);            \
@@ -8258,6 +8278,117 @@ TEST_F(RibNexthopTrackingFixture, RibInAnnouncementWithNexthopTracking) {
   EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
 }
 
+TEST_F(RibNexthopTrackingFixture, PathUpdatesMaintainNexthopAssociations) {
+  RibStats::initCounters();
+  updateCacheAndNotifyRib(
+      {NexthopStatus(kPeerAddr1, false), NexthopStatus(kPeerAddr2, false)});
+  auto tcData = fb303::ThreadCachedServiceData::get();
+
+  const auto prefixBatch = PrefixPathIds{{kV4Prefix1, kDefaultPathID}};
+  const auto peerId = BgpPeerId{iBgpPeer_.addr, iBgpPeer_.routerId};
+  auto makeAttrs = [](int asCount, const folly::IPAddress& nexthop) {
+    auto attrs = std::make_shared<facebook::bgp::BgpPath>(
+        *buildBgpPathFields(asCount, 4, 4, 4));
+    attrs->setNexthop(nexthop);
+    attrs->publish();
+    return attrs;
+  };
+
+  auto initialAttrs = makeAttrs(4, kPeerAddr1);
+  std::shared_ptr<RouteInfo> initialRouteInfo;
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, initialAttrs, prefixBatch.front());
+    auto entry = rib_->ribEntries_.find(kV4Prefix1);
+    ASSERT_NE(entry, rib_->ribEntries_.end());
+    initialRouteInfo = entry->second.getRouteInfo(peerId, kDefaultPathID);
+    ASSERT_NE(initialRouteInfo, nullptr);
+    auto nexthopInfo = rib_->nexthopInfoMap_.find(kPeerAddr1);
+    ASSERT_NE(nexthopInfo, rib_->nexthopInfoMap_.end());
+    EXPECT_EQ(1, nexthopInfo->second.getRouteInfoListSize());
+  });
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, initialAttrs, prefixBatch.front());
+    const auto& entry = rib_->ribEntries_.at(kV4Prefix1);
+    EXPECT_EQ(initialRouteInfo, entry.getRouteInfo(peerId, kDefaultPathID));
+    EXPECT_EQ(1, rib_->nexthopInfoMap_.at(kPeerAddr1).getRouteInfoListSize());
+  });
+
+  auto refreshedAttrs = makeAttrs(5, kPeerAddr1);
+  std::shared_ptr<RouteInfo> refreshedRouteInfo;
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, refreshedAttrs, prefixBatch.front());
+    const auto& entry = rib_->ribEntries_.at(kV4Prefix1);
+    refreshedRouteInfo = entry.getRouteInfo(peerId, kDefaultPathID);
+    ASSERT_NE(refreshedRouteInfo, nullptr);
+    EXPECT_NE(initialRouteInfo, refreshedRouteInfo);
+    EXPECT_FALSE(initialRouteInfo->isOnNextHopList());
+    EXPECT_TRUE(refreshedRouteInfo->isOnNextHopList());
+    EXPECT_EQ(1, rib_->nexthopInfoMap_.at(kPeerAddr1).getRouteInfoListSize());
+  });
+
+  auto changedNexthopAttrs = makeAttrs(6, kPeerAddr2);
+  std::shared_ptr<RouteInfo> changedNexthopRouteInfo;
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, changedNexthopAttrs, prefixBatch.front());
+    const auto& entry = rib_->ribEntries_.at(kV4Prefix1);
+    changedNexthopRouteInfo = entry.getRouteInfo(peerId, kDefaultPathID);
+    ASSERT_NE(changedNexthopRouteInfo, nullptr);
+    EXPECT_FALSE(refreshedRouteInfo->isOnNextHopList());
+    EXPECT_TRUE(changedNexthopRouteInfo->isOnNextHopList());
+    EXPECT_EQ(
+        rib_->nexthopInfoMap_.end(), rib_->nexthopInfoMap_.find(kPeerAddr1));
+    EXPECT_EQ(1, rib_->nexthopInfoMap_.at(kPeerAddr2).getRouteInfoListSize());
+    EXPECT_FALSE(rib_->nexthopCache_->isRegistered(kPeerAddr1));
+  });
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(iBgpPeer_, nullptr, prefixBatch.front());
+    EXPECT_FALSE(changedNexthopRouteInfo->isOnNextHopList());
+    EXPECT_EQ(
+        rib_->nexthopInfoMap_.end(), rib_->nexthopInfoMap_.find(kPeerAddr2));
+    EXPECT_FALSE(rib_->nexthopCache_->isRegistered(kPeerAddr2));
+  });
+  tcData->publishStats();
+  EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  const PrefixPathId firstPath{kV6Prefix1, 1};
+  const PrefixPathId secondPath{kV6Prefix1, 2};
+  auto sharedNexthopAttrs = makeAttrs(4, kPeerAddr1);
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(iBgpPeer_, sharedNexthopAttrs, firstPath);
+    rib_->processSingleRibInUpdate(iBgpPeer_, sharedNexthopAttrs, secondPath);
+    EXPECT_EQ(2, rib_->nexthopInfoMap_.at(kPeerAddr1).getRouteInfoListSize());
+  });
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(iBgpPeer_, nullptr, firstPath);
+    EXPECT_EQ(1, rib_->nexthopInfoMap_.at(kPeerAddr1).getRouteInfoListSize());
+    EXPECT_TRUE(rib_->nexthopCache_->isRegistered(kPeerAddr1));
+  });
+  tcData->publishStats();
+  EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(iBgpPeer_, nullptr, secondPath);
+    EXPECT_EQ(
+        rib_->nexthopInfoMap_.end(), rib_->nexthopInfoMap_.find(kPeerAddr1));
+    EXPECT_FALSE(rib_->nexthopCache_->isRegistered(kPeerAddr1));
+  });
+  tcData->publishStats();
+  EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+}
+
 /**
  * Verify that nexthops learned from RIB-IN announcements are handed to the
  * nexthop-subscribe requester exactly once each (de-duped), at the RIB-IN
@@ -8691,6 +8822,282 @@ TEST_F(
     EXPECT_TRUE(nexthopInfoIt->second.isReachable());
     EXPECT_EQ(std::optional<uint32_t>(100), nexthopInfoIt->second.getIgpCost());
     EXPECT_TRUE(rib_->nexthopCache_->isRegistered(kPeerAddr1));
+  });
+}
+
+namespace {
+std::shared_ptr<facebook::bgp::BgpPath> pathVia(
+    const folly::IPAddress& nexthop) {
+  auto attrs =
+      std::make_shared<facebook::bgp::BgpPath>(*buildBgpPathFields(4, 4, 4, 4));
+  attrs->setNexthop(nexthop);
+  attrs->publish();
+  return attrs;
+}
+
+int64_t staleNexthopUpdateSkippedCount() {
+  auto tcData = fb303::ThreadCachedServiceData::get();
+  tcData->publishStats();
+  return tcData->getCounter(RibStats::kNhtRibStaleUpdateSkipped + ".count");
+}
+} // namespace
+
+/*
+ * The last route via a nexthop is withdrawn and announced again while an update
+ * that marks the nexthop unreachable is still queued. When the route returns,
+ * the RIB reads the reachable status from NexthopCache. After the RIB processes
+ * the queued update, the NexthopInfo must stay reachable.
+ */
+TEST_F(
+    RibNexthopTrackingFixture,
+    QueuedUnreachableUpdateDoesNotOverwriteReregisteredStatus) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const NexthopStatus reachable(
+      kPeerAddr1, /*isReachable=*/true, /*igpCost=*/100);
+  const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
+  const auto attrs = pathVia(kPeerAddr1);
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus({reachable});
+    rib_->processSingleRibInUpdate(iBgpPeer_, attrs, prefixPathId);
+    auto queuedStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/false)});
+    ASSERT_EQ(1, queuedStatuses.size());
+
+    rib_->processSingleRibInUpdate(iBgpPeer_, nullptr, prefixPathId);
+    ASSERT_TRUE(nexthopCache->addOrUpdateNextHopStatus({reachable}).empty());
+    rib_->processSingleRibInUpdate(iBgpPeer_, attrs, prefixPathId);
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(queuedStatuses)));
+
+    const auto& nexthopInfo = rib_->nexthopInfoMap_.at(kPeerAddr1);
+    EXPECT_TRUE(nexthopInfo.isReachable());
+    EXPECT_EQ(std::optional<uint32_t>(100), nexthopInfo.getIgpCost());
+  });
+}
+
+/*
+ * The last route via a nexthop is withdrawn and announced again while an update
+ * that marks the nexthop reachable is still queued. When the route returns, the
+ * RIB reads the unreachable status from NexthopCache. After the RIB processes
+ * the queued update, the NexthopInfo must stay unreachable.
+ */
+TEST_F(
+    RibNexthopTrackingFixture,
+    QueuedReachableUpdateDoesNotOverwriteReregisteredStatus) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const NexthopStatus unreachable(kPeerAddr1, /*isReachable=*/false);
+  const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
+  const auto attrs = pathVia(kPeerAddr1);
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus({unreachable});
+    rib_->processSingleRibInUpdate(iBgpPeer_, attrs, prefixPathId);
+    auto queuedStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/100)});
+    ASSERT_EQ(1, queuedStatuses.size());
+
+    rib_->processSingleRibInUpdate(iBgpPeer_, nullptr, prefixPathId);
+    ASSERT_TRUE(nexthopCache->addOrUpdateNextHopStatus({unreachable}).empty());
+    rib_->processSingleRibInUpdate(iBgpPeer_, attrs, prefixPathId);
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(queuedStatuses)));
+
+    const auto& nexthopInfo = rib_->nexthopInfoMap_.at(kPeerAddr1);
+    EXPECT_FALSE(nexthopInfo.isReachable());
+    EXPECT_FALSE(nexthopInfo.getIgpCost().has_value());
+  });
+}
+
+/*
+ * The RIB can receive two nexthop updates in the reverse order of the
+ * NexthopCache writes. After the RIB processes both, the NexthopInfo must match
+ * the latest status in NexthopCache.
+ */
+TEST_F(
+    RibNexthopTrackingFixture,
+    OutOfOrderNexthopUpdatesUseLatestCachedStatus) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
+  const auto attrs = pathVia(kPeerAddr1);
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/10)});
+    rib_->processSingleRibInUpdate(iBgpPeer_, attrs, prefixPathId);
+
+    auto firstStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/false)});
+    auto secondStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/20)});
+    ASSERT_EQ(1, firstStatuses.size());
+    ASSERT_EQ(1, secondStatuses.size());
+
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(secondStatuses)));
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(firstStatuses)));
+
+    const auto& nexthopInfo = rib_->nexthopInfoMap_.at(kPeerAddr1);
+    EXPECT_TRUE(nexthopInfo.isReachable());
+    EXPECT_EQ(std::optional<uint32_t>(20), nexthopInfo.getIgpCost());
+  });
+}
+
+/*
+ * The RIB skips a queued update that is older than the status it already read,
+ * and counts the skip. The newer status is applied when its own update arrives.
+ */
+TEST_F(RibNexthopTrackingFixture, StaleNexthopUpdateIsSkippedAndCounted) {
+  RibStats::initCounters();
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/10)});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), prefixPathId);
+    auto staleStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/false)});
+    auto newerStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/20)});
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(newerStatuses)));
+    auto latestStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/30)});
+    const auto skippedBefore = staleNexthopUpdateSkippedCount();
+
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(staleStatuses)));
+
+    EXPECT_EQ(
+        std::optional<uint32_t>(20),
+        rib_->nexthopInfoMap_.at(kPeerAddr1).getIgpCost());
+    EXPECT_EQ(skippedBefore + 1, staleNexthopUpdateSkippedCount());
+
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(latestStatuses)));
+    EXPECT_EQ(
+        std::optional<uint32_t>(30),
+        rib_->nexthopInfoMap_.at(kPeerAddr1).getIgpCost());
+  });
+}
+
+/*
+ * Epochs are compared per nexthop. An update with a larger epoch for one
+ * nexthop must not make the RIB skip an older update for another nexthop.
+ */
+TEST_F(RibNexthopTrackingFixture, NexthopUpdatesForTwoNexthopsApplyOutOfOrder) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/10),
+         NexthopStatus(kPeerAddr2, /*isReachable=*/true, /*igpCost=*/10)});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), {kV4Prefix1, kDefaultPathID});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr2), {kV4Prefix2, kDefaultPathID});
+    auto statusesB = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr2, /*isReachable=*/true, /*igpCost=*/20)});
+    auto statusesA = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/20)});
+
+    rib_->processRibInNexthopUpdate(RibInNexthopUpdate(std::move(statusesA)));
+    rib_->processRibInNexthopUpdate(RibInNexthopUpdate(std::move(statusesB)));
+
+    EXPECT_EQ(
+        std::optional<uint32_t>(20),
+        rib_->nexthopInfoMap_.at(kPeerAddr2).getIgpCost());
+  });
+}
+
+/*
+ * An update with epoch 0 was not stored by NexthopCache, for example a status
+ * built by hand. The RIB always re-reads NexthopCache for it.
+ */
+TEST_F(RibNexthopTrackingFixture, UnstampedNexthopUpdateAlwaysRereads) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/10)});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), prefixPathId);
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/20)});
+
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate({NexthopStatus(kPeerAddr1, /*isReachable=*/false)}));
+
+    EXPECT_EQ(
+        std::optional<uint32_t>(20),
+        rib_->nexthopInfoMap_.at(kPeerAddr1).getIgpCost());
+  });
+}
+
+/*
+ * An update whose epoch equals the epoch the RIB holds is re-read, not
+ * skipped. A cache write that kept an old epoch therefore still reaches the
+ * RIB.
+ */
+TEST_F(RibNexthopTrackingFixture, NexthopUpdateWithEqualEpochRereads) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/10)});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), prefixPathId);
+    auto statuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/20)});
+    rib_->processRibInNexthopUpdate(RibInNexthopUpdate(statuses));
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/30)});
+
+    rib_->processRibInNexthopUpdate(RibInNexthopUpdate(std::move(statuses)));
+
+    EXPECT_EQ(
+        std::optional<uint32_t>(30),
+        rib_->nexthopInfoMap_.at(kPeerAddr1).getIgpCost());
+  });
+}
+
+/*
+ * A skipped entry must not stop the RIB from processing the rest of the
+ * update, or from re-checking the initial path computation gate.
+ */
+TEST_F(
+    RibNexthopTrackingFixture,
+    SkippedNexthopUpdateStillRunsInitialPathComputation) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), {kV4Prefix1, kDefaultPathID});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr2), {kV4Prefix2, kDefaultPathID});
+    rib_->processRibInInitialPathComputation(std::chrono::seconds(60));
+    ASSERT_FALSE(rib_->ribEoRReceived_);
+    auto staleStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/10)});
+    auto newerStatuses = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/20)});
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate(std::move(newerStatuses)));
+    auto statusesB = nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr2, /*isReachable=*/true, /*igpCost=*/10)});
+    ASSERT_EQ(1, staleStatuses.size());
+    ASSERT_EQ(1, statusesB.size());
+
+    rib_->processRibInNexthopUpdate(
+        RibInNexthopUpdate({staleStatuses.front(), statusesB.front()}));
+
+    EXPECT_TRUE(rib_->ribEoRReceived_);
+    EXPECT_TRUE(rib_->nexthopInfoMap_.at(kPeerAddr2).isResolvedForSelection());
   });
 }
 

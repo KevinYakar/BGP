@@ -727,6 +727,10 @@ void initCounters() {
       kNhtCacheNexthopUnreachable + ".count", 0);
   fb303::ThreadCachedServiceData::get()->setCounter(
       kNhtCacheNexthopUnreachable + ".count.60", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibStaleUpdateSkipped + ".count", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibStaleUpdateSkipped + ".count.60", 0);
 
   fb303::ThreadCachedServiceData::get()->setCounter(kAdjRibInCount, 0);
   fb303::ThreadCachedServiceData::get()->setCounter(kAdjRibInStaleCount, 0);
@@ -895,6 +899,14 @@ void incrNhtCacheNexthopReachable() {
 
 void incrNhtCacheNexthopUnreachable() {
   STATS_nhtCacheNexthopUnreachable.add(1);
+}
+
+DEFINE_timeseries(
+    nhtRibStaleUpdateSkipped,
+    kNhtRibStaleUpdateSkipped,
+    fb303::COUNT);
+void incrNhtRibStaleUpdateSkipped() {
+  STATS_nhtRibStaleUpdateSkipped.add(1);
 }
 
 DEFINE_quantile_stat(

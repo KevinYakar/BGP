@@ -1006,10 +1006,6 @@ void RibFixture::sendResumeBestPathAndFibProgramming(
   ribInQ_.fiberPush(ResumeBestPathAndFibProgramming(ribPauseResumeCause));
 }
 
-void RibFixture::sendNexthopUpdate(RibInNexthopUpdate nexthopUpdate) {
-  ribInQ_.fiberPush(std::move(nexthopUpdate));
-}
-
 void RibFixture::updateCacheAndNotifyRib(
     const std::vector<NexthopStatus>& updates) {
   auto statuses = rib_->nexthopCache_->addOrUpdateNextHopStatus(updates);

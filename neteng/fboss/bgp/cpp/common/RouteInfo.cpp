@@ -305,11 +305,11 @@ void RouteInfo::setNexthopInfo(NexthopInfoBase* nexthopInfo) {
   nexthopInfo_ = nexthopInfo;
 }
 
-void RouteInfo::unlinkFromNexthopInfo() noexcept {
+bool RouteInfo::unlinkFromNexthopInfo() noexcept {
   if (nexthopInfo_ == nullptr) {
-    return;
+    return false;
   }
-  nexthopInfo_->unlinkRouteInfo(*this);
+  return nexthopInfo_->unlinkRouteInfo(*this);
 }
 
 bool RouteInfo::isNexthopReachable() const {

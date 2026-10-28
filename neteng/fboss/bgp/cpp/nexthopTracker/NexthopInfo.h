@@ -110,6 +110,14 @@ class NexthopInfo : public NexthopInfoBase {
   }
 
   /**
+   * @brief Get the epoch of the NexthopCache status that the RIB last read.
+   * See NexthopStatus::getEpoch().
+   */
+  uint64_t getEpoch() const {
+    return status_.getEpoch();
+  }
+
+  /**
    * @brief Update the status of this nexthop
    * @param status The new status for this nexthop
    */
@@ -150,11 +158,12 @@ class NexthopInfo : public NexthopInfoBase {
     }
   }
 
-  void unlinkRouteInfo(RouteInfo& routeInfo) noexcept override {
+  bool unlinkRouteInfo(RouteInfo& routeInfo) noexcept override {
     if (!nexthopAssociationList_.unlink(routeInfo)) {
-      return;
+      return false;
     }
     routeInfo.setNexthopInfo(nullptr);
+    return true;
   }
 
   bool isRouteInfoListEmpty() const {
