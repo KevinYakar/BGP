@@ -41,6 +41,17 @@ jobs:
         run: sudo rm -rf ${{ github.workspace }}/*
       - name: Check out repository code
         uses: actions/checkout@v7
+      - name: Update system package info
+        run: sudo apt-get update
+      - name: Install system deps
+        run: >
+          sudo
+          python3
+          build/fbcode_builder/getdeps.py
+          --allow-system-packages
+          install-system-deps
+          --recursive
+          bgp
       # Build DC against the FBOSS fsdb_client profile and BB against the
       # smaller exported_libraries profile. Separate build directories ensure
       # each variant configures and installs its own dependency closure.
