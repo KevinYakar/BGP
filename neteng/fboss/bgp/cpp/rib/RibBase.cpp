@@ -1352,6 +1352,13 @@ void RibBase::processRibInNexthopUpdate(
           ribCounters_.incrementUnresolvableNexthopCount();
         }
       }
+      if (isReachabilityChanged) {
+        if (isReachable) {
+          RibStats::incrNhtRibNexthopReachable();
+        } else {
+          RibStats::incrNhtRibNexthopUnreachable();
+        }
+      }
 
       if (isReachabilityChanged || isIgpCostChanged || isResolvabilityChanged) {
         XLOGF(
@@ -1391,7 +1398,11 @@ void RibBase::processRibInNexthopUpdate(
            routeInfoIt++) {
         // Get the ribEntry directly from the RouteInfo
         RibEntry& ribEntry = routeInfoIt->getRibEntry();
-        ribEntry.requirePathSelection();
+        if (isResolvabilityChanged) {
+          ribEntry.requirePathSelectionForNexthopResolvabilityChange();
+        } else {
+          ribEntry.requirePathSelection();
+        }
         if (!needPathSelection) {
           needPathSelection = true;
         }
@@ -1913,6 +1924,9 @@ void RibBase::prepareFibProgramming(bool fullSync) noexcept {
 
     auto pathSelectionStartTime = std::chrono::steady_clock::now();
     auto [bestpathChanged, nexthopChanged] = runBestPathSelection(ribEntry);
+    if (ribEntry.consumeNexthopResolvabilityChangePending()) {
+      RibStats::incrNhtRibResolvabilityChangePrefixReevaluation();
+    }
     RibStats::STATS_ribPathSelectionTimeMs.addValue(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - pathSelectionStartTime)

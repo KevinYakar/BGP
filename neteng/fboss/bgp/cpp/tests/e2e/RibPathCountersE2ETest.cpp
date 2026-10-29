@@ -17,15 +17,15 @@
 /*
  * E2E tests for the per-address-family RIB path gauges:
  *   bgpd.rib.total_paths.{ipv4,ipv6}.count
- *   bgpd.rib.inactive_path.{ipv4,ipv6}.count
+ *   bgpcpp.rib.inactive_paths.unresolved_nexthops.{ipv4,ipv6}.count
  *
  * Both are published from RibCounters at RIB batch boundaries. The property
  * under test is that the two families always add up to their aggregate:
  *   - total_paths v4 + v6 equals the aggregate bgpd.rib.total_paths.count
  *     gauge. bgpd.rib.totalRibPaths is deliberately not compared: it counts
  *     (prefix, peer) pairs, not paths, so it undercounts under ADD-PATH.
- *   - inactive_path v4 + v6 equals the aggregate bgpd.rib.inactive_path.count
- *     gauge.
+ *   - inactive unresolved-nexthop paths v4 + v6 equals the aggregate
+ *     bgpcpp.rib.inactive_paths.unresolved_nexthops.count gauge.
  * Each family is additionally checked against getRibSummary for that family.
  *
  * The sums are checked after every step of a 100-prefix (40 IPv4 / 60 IPv6)
@@ -321,12 +321,12 @@ class RibPathCountersE2ETest : public E2ETestFixture {
 
   FamilyCounts fb303InactivePaths() {
     return {
-        readCounter(RibStats::kInactivePathCountIpv4),
-        readCounter(RibStats::kInactivePathCountIpv6)};
+        readCounter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv4),
+        readCounter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv6)};
   }
 
   int64_t fb303InactivePathAggregate() {
-    return readCounter(RibStats::kInactivePathCount);
+    return readCounter(RibStats::kInactivePathsUnresolvedNexthopsCount);
   }
 
   int64_t fb303TotalPathsAggregate() {
@@ -447,9 +447,8 @@ TEST_F(RibPathCountersE2ETest, PerFamilyTotalPathGaugesSumAcrossChurn) {
 
 /*
  * Making a nexthop unresolvable moves every path behind it out of best-path
- * selection. The per-family inactive_path gauges must always add up to the
- * aggregate inactive_path gauge, per family and in total, as the unresolvable
- * set changes.
+ * selection. The per-family inactive unresolved-nexthop path gauges must
+ * always add up to the aggregate gauge as the unresolvable set changes.
  */
 TEST_F(RibPathCountersE2ETest, PerFamilyInactivePathGaugesSumToAggregate) {
   bringUpAllPeersWithEor();

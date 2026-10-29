@@ -130,6 +130,7 @@ TEST(RibCountersTest, InactivePathsPerAfiFromDeltas) {
   RibStats::initCounters();
   RibCounters c;
   EXPECT_EQ(0, c.inactivePaths());
+  EXPECT_EQ(0, counter(RibStats::kInactivePathsUnresolvedNexthopsCount));
   EXPECT_EQ(0, counter(RibStats::kInactivePathCount));
 
   // Two v4 prefixes each gain an inactive path; one v6 prefix gains two.
@@ -141,6 +142,9 @@ TEST(RibCountersTest, InactivePathsPerAfiFromDeltas) {
   EXPECT_EQ(2, c.inactivePaths(/*isV4=*/true));
   EXPECT_EQ(2, c.inactivePaths(/*isV4=*/false));
   EXPECT_EQ(4, c.inactivePaths());
+  EXPECT_EQ(4, counter(RibStats::kInactivePathsUnresolvedNexthopsCount));
+  EXPECT_EQ(2, counter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv4));
+  EXPECT_EQ(2, counter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv6));
   EXPECT_EQ(4, counter(RibStats::kInactivePathCount));
   EXPECT_EQ(2, counter(RibStats::kInactivePathCountIpv4));
   EXPECT_EQ(2, counter(RibStats::kInactivePathCountIpv6));
@@ -150,6 +154,9 @@ TEST(RibCountersTest, InactivePathsPerAfiFromDeltas) {
   c.publishInactivePathCounters();
   EXPECT_EQ(0, c.inactivePaths(/*isV4=*/true));
   EXPECT_EQ(2, c.inactivePaths(/*isV4=*/false));
+  EXPECT_EQ(2, counter(RibStats::kInactivePathsUnresolvedNexthopsCount));
+  EXPECT_EQ(0, counter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv4));
+  EXPECT_EQ(2, counter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv6));
   EXPECT_EQ(2, counter(RibStats::kInactivePathCount));
   EXPECT_EQ(0, counter(RibStats::kInactivePathCountIpv4));
   EXPECT_EQ(2, counter(RibStats::kInactivePathCountIpv6));
@@ -174,6 +181,7 @@ TEST(RibCountersTest, PrefixRemovalReleasesCachedInactivePaths) {
   c.onPrefixRemoved(/*isV4=*/true, 24, /*inactivePaths=*/3);
   EXPECT_EQ(0, c.totalPrefixes());
   EXPECT_EQ(0, c.inactivePaths());
+  EXPECT_EQ(0, counter(RibStats::kInactivePathsUnresolvedNexthopsCount));
   EXPECT_EQ(0, counter(RibStats::kInactivePathCount));
 }
 
@@ -316,6 +324,9 @@ TEST(RibCountersTest, ResetZeroesInMemoryFields) {
   EXPECT_EQ(0, c.originatedRoutes());
   EXPECT_EQ(0, c.unresolvableNexthops());
   EXPECT_EQ(0, c.ebgpPrefixes(/*isV4=*/true));
+  EXPECT_EQ(0, counter(RibStats::kInactivePathsUnresolvedNexthopsCount));
+  EXPECT_EQ(0, counter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv4));
+  EXPECT_EQ(0, counter(RibStats::kInactivePathsUnresolvedNexthopsCountIpv6));
   EXPECT_EQ(0, counter(RibStats::kInactivePathCount));
   EXPECT_EQ(0, counter(RibStats::kInactivePathCountIpv4));
   EXPECT_EQ(0, counter(RibStats::kInactivePathCountIpv6));

@@ -372,6 +372,17 @@ class RibEntry {
   uint32_t getPathIdToSend();
 
  private:
+  void requirePathSelectionForNexthopResolvabilityChange() {
+    needPathSelection_ = true;
+    nexthopResolvabilityChangePending_ = true;
+  }
+
+  bool consumeNexthopResolvabilityChangePending() {
+    const bool pending = nexthopResolvabilityChangePending_;
+    nexthopResolvabilityChangePending_ = false;
+    return pending;
+  }
+
   // v4 or v6 prefix for this RibEntry
   const folly::CIDRNetwork prefix_;
 
@@ -420,6 +431,7 @@ class RibEntry {
    * NOTE: flag is set to false after selectBestPath is called.
    */
   bool needPathSelection_{true};
+  bool nexthopResolvabilityChangePending_{false};
 
   /*
    * True while this live entry has FibOut state, including NONE. Kept

@@ -51,6 +51,12 @@ TEST(StatsTest, RibStatsInitCounterTest) {
     EXPECT_FALSE(counters->hasCounter(RibStats::kTotalRouteChurnDetected));
     EXPECT_FALSE(counters->hasCounter(RibStats::kRibTableVersion));
     EXPECT_FALSE(counters->hasCounter(RibStats::kRibPrefixCount));
+    EXPECT_FALSE(
+        counters->hasCounter(RibStats::kInactivePathsUnresolvedNexthopsCount));
+    EXPECT_FALSE(counters->hasCounter(
+        RibStats::kInactivePathsUnresolvedNexthopsCountIpv4));
+    EXPECT_FALSE(counters->hasCounter(
+        RibStats::kInactivePathsUnresolvedNexthopsCountIpv6));
     EXPECT_FALSE(counters->hasCounter(RibStats::kInactivePathCount));
     EXPECT_FALSE(counters->hasCounter(RibStats::kInactivePathCountIpv4));
     EXPECT_FALSE(counters->hasCounter(RibStats::kInactivePathCountIpv6));
@@ -77,6 +83,17 @@ TEST(StatsTest, RibStatsInitCounterTest) {
     EXPECT_EQ(0, counters->getCounter(RibStats::kTotalRouteChurnDetected));
     EXPECT_EQ(0, counters->getCounter(RibStats::kRibTableVersion));
     EXPECT_EQ(0, counters->getCounter(RibStats::kRibPrefixCount));
+    EXPECT_EQ(
+        0,
+        counters->getCounter(RibStats::kInactivePathsUnresolvedNexthopsCount));
+    EXPECT_EQ(
+        0,
+        counters->getCounter(
+            RibStats::kInactivePathsUnresolvedNexthopsCountIpv4));
+    EXPECT_EQ(
+        0,
+        counters->getCounter(
+            RibStats::kInactivePathsUnresolvedNexthopsCountIpv6));
     EXPECT_EQ(0, counters->getCounter(RibStats::kInactivePathCount));
     EXPECT_EQ(0, counters->getCounter(RibStats::kInactivePathCountIpv4));
     EXPECT_EQ(0, counters->getCounter(RibStats::kInactivePathCountIpv6));

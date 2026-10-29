@@ -8236,6 +8236,7 @@ TEST_F(RibFixture, PathsAreUpdatedByPathId) {
 namespace {
 void setNexthopTrackingFeatureFlag(bool enabled);
 int64_t inactivePathCount();
+int64_t timeseriesCount(const std::string& name);
 } // namespace
 
 TEST_F(RibNexthopTrackingFixture, RibInAnnouncementWithNexthopTracking) {
@@ -8630,6 +8631,13 @@ TEST_F(RibNexthopTrackingFixture, ReachabilityAndResolutionAreIndependent) {
   sendInitialPathComputation(std::chrono::milliseconds(0));
   fibFuture.wait();
 
+  const auto reachableEventsBefore =
+      timeseriesCount(RibStats::kNhtRibNexthopReachable);
+  const auto unreachableEventsBefore =
+      timeseriesCount(RibStats::kNhtRibNexthopUnreachable);
+  const auto reevaluationsBefore =
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation);
+
   EXPECT_NE(nullptr, rib_->getBestPath(kV4Prefix1));
   EXPECT_EQ(nullptr, rib_->getBestPath(kV6Prefix1));
   EXPECT_EQ(1, inactivePathCount());
@@ -8690,6 +8698,12 @@ TEST_F(RibNexthopTrackingFixture, ReachabilityAndResolutionAreIndependent) {
   EXPECT_EQ(2, inactivePathCount());
   tcData->publishStats();
   EXPECT_EQ(2, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+  EXPECT_EQ(
+      unreachableEventsBefore + 1,
+      timeseriesCount(RibStats::kNhtRibNexthopUnreachable));
+  EXPECT_EQ(
+      reevaluationsBefore + 1,
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation));
 
   fibFuture = fib_->getFibProgramFuture();
   updateCacheAndNotifyRib({dcStatus});
@@ -8698,6 +8712,12 @@ TEST_F(RibNexthopTrackingFixture, ReachabilityAndResolutionAreIndependent) {
   EXPECT_EQ(1, inactivePathCount());
   tcData->publishStats();
   EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+  EXPECT_EQ(
+      reachableEventsBefore + 1,
+      timeseriesCount(RibStats::kNhtRibNexthopReachable));
+  EXPECT_EQ(
+      reevaluationsBefore + 2,
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation));
 }
 
 TEST_F(RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect) {
@@ -8716,6 +8736,11 @@ TEST_F(RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect) {
       PrefixPathIds{{kV4Prefix1, kDefaultPathID}}, iBgpPeer_, attrs);
   sendInitialPathComputation(std::chrono::milliseconds(0));
   fibFuture.wait();
+
+  const auto reachableEventsBefore =
+      timeseriesCount(RibStats::kNhtRibNexthopReachable);
+  const auto reevaluationsBefore =
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation);
 
   EXPECT_CALL(*rib_, prepareFibProgramming_()).Times(0);
   rib_->evb_.runInEventBaseThreadAndWait([&]() {
@@ -8739,6 +8764,12 @@ TEST_F(RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect) {
   auto tcData = fb303::ThreadCachedServiceData::get();
   tcData->publishStats();
   EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+  EXPECT_EQ(
+      reachableEventsBefore + 1,
+      timeseriesCount(RibStats::kNhtRibNexthopReachable));
+  EXPECT_EQ(
+      reevaluationsBefore,
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation));
 
   EXPECT_CALL(*rib_, prepareFibProgramming_()).Times(1);
   fibFuture = fib_->getFibProgramFuture();
@@ -8752,6 +8783,9 @@ TEST_F(RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect) {
   EXPECT_EQ(info->igp_cost(), 50);
   tcData->publishStats();
   EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+  EXPECT_EQ(
+      reevaluationsBefore + 1,
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation));
 
   EXPECT_CALL(*rib_, prepareFibProgramming_()).Times(1);
   auto ribFuture = rib_->getRibPrepareFibProgrammingFuture();
@@ -8778,6 +8812,9 @@ TEST_F(RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect) {
   EXPECT_FALSE(*info->is_resolved_for_selection());
   tcData->publishStats();
   EXPECT_EQ(1, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+  EXPECT_EQ(
+      reevaluationsBefore + 2,
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation));
 
   const PrefixPathId prefixPathId{kV4Prefix1, kDefaultPathID};
   rib_->evb_.runInEventBaseThreadAndWait([&]() {
@@ -8791,6 +8828,39 @@ TEST_F(RibNexthopTrackingFixture, SourceOnlyReachabilityChangeDoesNotReselect) {
   EXPECT_FALSE(retainedStatus.getIgpCost().has_value());
   tcData->publishStats();
   EXPECT_EQ(0, tcData->getCounter(RibStats::kRibUnresolvableNexthopsCount));
+}
+
+TEST_F(
+    RibNexthopTrackingFixture,
+    ResolvabilityChangeCountsOneReevaluationPerPrefix) {
+  RibStats::initCounters();
+  setNexthopTrackingFeatureFlag(true);
+  rib_->setFibBatchTime(milliseconds(2));
+  updateCacheAndNotifyRib({NexthopStatus(kPeerAddr1, false)});
+
+  auto attrs =
+      std::make_shared<facebook::bgp::BgpPath>(*buildBgpPathFields(4, 4, 4, 4));
+  attrs->setNexthop(kPeerAddr1);
+  attrs->publish();
+
+  const auto prefixBatch = PrefixPathIds{{kV4Prefix1, kDefaultPathID}};
+  auto fibFuture = fib_->getFibProgramFuture();
+  sendAnnouncement(prefixBatch, iBgpPeer_, attrs);
+  sendAnnouncement(prefixBatch, eBgpPeer1_, attrs);
+  sendInitialPathComputation(std::chrono::milliseconds(0));
+  fibFuture.wait();
+  EXPECT_EQ(nullptr, rib_->getBestPath(kV4Prefix1));
+
+  const auto reevaluationsBefore =
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation);
+  fibFuture = fib_->getFibProgramFuture();
+  updateCacheAndNotifyRib({NexthopStatus(kPeerAddr1, true, 50)});
+  fibFuture.wait();
+
+  EXPECT_NE(nullptr, rib_->getBestPath(kV4Prefix1));
+  EXPECT_EQ(
+      reevaluationsBefore + 1,
+      timeseriesCount(RibStats::kNhtRibResolvabilityChangePrefixReevaluation));
 }
 
 TEST_F(
@@ -9292,7 +9362,13 @@ void setNexthopTrackingFeatureFlag(bool enabled) {
 int64_t inactivePathCount() {
   auto tcData = fb303::ThreadCachedServiceData::get();
   tcData->publishStats();
-  return tcData->getCounter(RibStats::kInactivePathCount);
+  return tcData->getCounter(RibStats::kInactivePathsUnresolvedNexthopsCount);
+}
+
+int64_t timeseriesCount(const std::string& name) {
+  auto tcData = fb303::ThreadCachedServiceData::get();
+  tcData->publishStats();
+  return tcData->getCounter(name + ".count");
 }
 } // namespace
 

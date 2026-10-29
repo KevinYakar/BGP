@@ -572,15 +572,25 @@ void decrUnresolvableNexthopsCount();
  * rather than incremented in place, so the gauge cannot accumulate drift even
  * if a delta is ever missed.
  */
-inline const auto kInactivePathCount =
-    fmt::format("{}.rib.inactive_path.count", kBgpcppTag);
-void setInactivePathCount(int64_t count);
+inline const auto kInactivePathsUnresolvedNexthopsCount =
+    fmt::format("{}.rib.inactive_paths.unresolved_nexthops.count", kBgpcppTag);
 
 /* Per-address-family breakdown of the above. */
+inline const auto kInactivePathsUnresolvedNexthopsCountIpv4 = fmt::format(
+    "{}.rib.inactive_paths.unresolved_nexthops.ipv4.count",
+    kBgpcppTag);
+inline const auto kInactivePathsUnresolvedNexthopsCountIpv6 = fmt::format(
+    "{}.rib.inactive_paths.unresolved_nexthops.ipv6.count",
+    kBgpcppTag);
+
+/* Compatibility aliases for existing dashboards. */
+inline const auto kInactivePathCount =
+    fmt::format("{}.rib.inactive_path.count", kBgpcppTag);
 inline const auto kInactivePathCountIpv4 =
     fmt::format("{}.rib.inactive_path.ipv4.count", kBgpcppTag);
 inline const auto kInactivePathCountIpv6 =
     fmt::format("{}.rib.inactive_path.ipv6.count", kBgpcppTag);
+void setInactivePathCount(int64_t count);
 void setInactivePathCountForAfi(bool isV4, int64_t count);
 
 /*
@@ -626,6 +636,23 @@ inline const auto kNhtRibStaleUpdateSkipped =
     fmt::format("{}.nht.rib.stale_update_skipped", kBgpcppTag);
 DECLARE_timeseries(nhtRibStaleUpdateSkipped);
 void incrNhtRibStaleUpdateSkipped();
+
+// RIB-tracked nexthop reachability transition counters
+inline const auto kNhtRibNexthopReachable =
+    fmt::format("{}.nht.rib.nexthop_reachable", kBgpcppTag);
+DECLARE_timeseries(nhtRibNexthopReachable);
+void incrNhtRibNexthopReachable();
+
+inline const auto kNhtRibNexthopUnreachable =
+    fmt::format("{}.nht.rib.nexthop_unreachable", kBgpcppTag);
+DECLARE_timeseries(nhtRibNexthopUnreachable);
+void incrNhtRibNexthopUnreachable();
+
+inline const auto kNhtRibResolvabilityChangePrefixReevaluation = fmt::format(
+    "{}.nht.rib.resolvability_change.prefix_reevaluation",
+    kBgpcppTag);
+DECLARE_timeseries(nhtRibResolvabilityChangePrefixReevaluation);
+void incrNhtRibResolvabilityChangePrefixReevaluation();
 
 // Average batch size of fibBatchList_ at each flush
 inline const auto kFibBatchListSize =

@@ -708,6 +708,12 @@ void initCounters() {
   fb303::ThreadCachedServiceData::get()->setCounter(
       kRibUnresolvableNexthopsCount, 0);
 
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kInactivePathsUnresolvedNexthopsCount, 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kInactivePathsUnresolvedNexthopsCountIpv4, 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kInactivePathsUnresolvedNexthopsCountIpv6, 0);
   fb303::ThreadCachedServiceData::get()->setCounter(kInactivePathCount, 0);
   fb303::ThreadCachedServiceData::get()->setCounter(kInactivePathCountIpv4, 0);
   fb303::ThreadCachedServiceData::get()->setCounter(kInactivePathCountIpv6, 0);
@@ -731,6 +737,18 @@ void initCounters() {
       kNhtRibStaleUpdateSkipped + ".count", 0);
   fb303::ThreadCachedServiceData::get()->setCounter(
       kNhtRibStaleUpdateSkipped + ".count.60", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibNexthopReachable + ".count", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibNexthopReachable + ".count.60", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibNexthopUnreachable + ".count", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibNexthopUnreachable + ".count.60", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibResolvabilityChangePrefixReevaluation + ".count", 0);
+  fb303::ThreadCachedServiceData::get()->setCounter(
+      kNhtRibResolvabilityChangePrefixReevaluation + ".count.60", 0);
 
   fb303::ThreadCachedServiceData::get()->setCounter(kAdjRibInCount, 0);
   fb303::ThreadCachedServiceData::get()->setCounter(kAdjRibInStaleCount, 0);
@@ -849,11 +867,18 @@ void decrUnresolvableNexthopsCount() {
 }
 
 void setInactivePathCount(int64_t count) {
-  fb303::ThreadCachedServiceData::get()->setCounter(kInactivePathCount, count);
+  auto tcData = fb303::ThreadCachedServiceData::get();
+  tcData->setCounter(kInactivePathsUnresolvedNexthopsCount, count);
+  tcData->setCounter(kInactivePathCount, count);
 }
 
 void setInactivePathCountForAfi(bool isV4, int64_t count) {
-  fb303::ThreadCachedServiceData::get()->setCounter(
+  auto tcData = fb303::ThreadCachedServiceData::get();
+  tcData->setCounter(
+      isV4 ? kInactivePathsUnresolvedNexthopsCountIpv4
+           : kInactivePathsUnresolvedNexthopsCountIpv6,
+      count);
+  tcData->setCounter(
       isV4 ? kInactivePathCountIpv4 : kInactivePathCountIpv6, count);
 }
 
@@ -907,6 +932,31 @@ DEFINE_timeseries(
     fb303::COUNT);
 void incrNhtRibStaleUpdateSkipped() {
   STATS_nhtRibStaleUpdateSkipped.add(1);
+}
+
+DEFINE_timeseries(
+    nhtRibNexthopReachable,
+    kNhtRibNexthopReachable,
+    fb303::COUNT);
+DEFINE_timeseries(
+    nhtRibNexthopUnreachable,
+    kNhtRibNexthopUnreachable,
+    fb303::COUNT);
+DEFINE_timeseries(
+    nhtRibResolvabilityChangePrefixReevaluation,
+    kNhtRibResolvabilityChangePrefixReevaluation,
+    fb303::COUNT);
+
+void incrNhtRibNexthopReachable() {
+  STATS_nhtRibNexthopReachable.add(1);
+}
+
+void incrNhtRibNexthopUnreachable() {
+  STATS_nhtRibNexthopUnreachable.add(1);
+}
+
+void incrNhtRibResolvabilityChangePrefixReevaluation() {
+  STATS_nhtRibResolvabilityChangePrefixReevaluation.add(1);
 }
 
 DEFINE_quantile_stat(
