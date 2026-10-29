@@ -1144,10 +1144,28 @@ class RibBase : public BgpModuleBase, public MonitoredModule {
    * NexthopInfo will be deleted from nexthopCache ONLY if the nexthop is
    * unreachable.
    *
+   * While fibBatchList_ is not empty, the NexthopInfo is kept. The FIB loop
+   * deletes it after it takes the batch.
+   *
    * @param nexthop The nexthop IP address to check for deletion
    * @return True if the NexthopInfo was deleted, false otherwise
    */
   bool checkAndDeleteNexthopInfo(const folly::IPAddress& nexthop);
+
+  using NexthopInfoMap =
+      folly::F14NodeMap<folly::IPAddress, facebook::bgp::NexthopInfo>;
+
+  /*
+   * Unregisters the nexthop from NexthopCache and erases its NexthopInfo.
+   * Returns the iterator after the erased element.
+   */
+  NexthopInfoMap::iterator deleteNexthopInfo(NexthopInfoMap::iterator it);
+
+  /*
+   * Deletes every NexthopInfo with no RouteInfo. The FIB loop calls it after it
+   * takes fibBatchList_.
+   */
+  void deleteUnusedNexthopInfos();
 
   /**
    * @brief Unlink a RouteInfo from its NexthopInfo, then call

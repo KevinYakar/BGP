@@ -110,6 +110,15 @@
   FRIEND_TEST(                                                                 \
       RibNexthopTrackingFixture,                                               \
       SkippedNexthopUpdateStillRunsInitialPathComputation);                    \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture,                                               \
+      ReplacedNexthopStaysInMapUntilPendingBatchIsTaken);                      \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture,                                               \
+      WithdrawnNexthopStaysInMapUntilPendingBatchIsTaken);                     \
+  FRIEND_TEST(                                                                 \
+      RibNexthopTrackingFixture,                                               \
+      RelinkedNexthopIsKeptAfterPendingBatchIsTaken);                          \
   FRIEND_TEST(RibNexthopTrackingFixture, RouteInfoStoresRibEntryPointer);      \
   FRIEND_TEST(RibNexthopTrackingFixture, RouteFlappingWithUniqueNexthop);      \
   FRIEND_TEST(RibNexthopTrackingFixture, GetNexthopInfoForNexthop);            \
@@ -9098,6 +9107,172 @@ TEST_F(
 
     EXPECT_TRUE(rib_->ribEoRReceived_);
     EXPECT_TRUE(rib_->nexthopInfoMap_.at(kPeerAddr2).isResolvedForSelection());
+  });
+}
+
+/*
+ * A route replacement moves the last route off nexthop N1 while a FIB batch
+ * that names N1 is still waiting for the FIB loop. The FIB reads N1's
+ * NexthopInfo to fill in the interface, so N1 must still be in nexthopInfoMap_
+ * when the FIB loop runs. After the FIB loop takes the batch, N1 is erased and
+ * unregistered.
+ */
+TEST_F(
+    RibNexthopTrackingFixture,
+    ReplacedNexthopStaysInMapUntilPendingBatchIsTaken) {
+  struct FibNexthopView {
+    std::optional<std::string> ifName;
+    std::optional<bool> isConnected;
+  };
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const auto prefix = folly::IPAddress::createNetwork("1::/64");
+  const PrefixPathId prefixPathId{prefix, kDefaultPathID};
+  bool programmed{false};
+  std::optional<FibNexthopView> programmedN1;
+  EXPECT_CALL(*fib_, updateUnicastRoute_(Eq(prefix), _, _, _, _, _))
+      .WillOnce([&](const folly::CIDRNetwork&,
+                    std::shared_ptr<const BgpPath>,
+                    std::shared_ptr<const WeightedNexthopMap>,
+                    const bool,
+                    const bool,
+                    const MockFib::NexthopInfoMap& nexthopInfoMap) {
+        programmed = true;
+        const auto it = nexthopInfoMap.find(kPeerAddr1);
+        if (it != nexthopInfoMap.end()) {
+          programmedN1 =
+              FibNexthopView{it->second.getIfName(), it->second.isConnected()};
+        }
+      })
+      .WillRepeatedly(::testing::Return());
+
+  auto fibFuture = fib_->getFibProgramFuture();
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(
+             kPeerAddr1,
+             /*isReachable=*/true,
+             /*igpCost=*/1,
+             /*isConnected=*/true,
+             /*excludeNexthopWithoutCost=*/true,
+             /*ifName=*/"eth1/1/1"),
+         NexthopStatus(kPeerAddr2, /*isReachable=*/true, /*igpCost=*/10)});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), prefixPathId);
+    rib_->processRibInInitialPathComputation(std::chrono::milliseconds(0));
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr2), prefixPathId);
+  });
+  fibFuture.wait();
+
+  ASSERT_TRUE(programmed);
+  ASSERT_TRUE(programmedN1.has_value());
+  EXPECT_EQ(std::optional<std::string>("eth1/1/1"), programmedN1->ifName);
+  EXPECT_EQ(std::optional<bool>(true), programmedN1->isConnected);
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    EXPECT_EQ(
+        rib_->nexthopInfoMap_.end(), rib_->nexthopInfoMap_.find(kPeerAddr1));
+    EXPECT_FALSE(nexthopCache->isRegistered(kPeerAddr1));
+  });
+}
+
+/*
+ * The last route via nexthop N1 is withdrawn while a FIB batch that names N1
+ * is still waiting for the FIB loop. The prefix keeps a path via N2, so its
+ * RibEntry stays in the batch. N1 must still be in nexthopInfoMap_ when the
+ * FIB loop builds the request. After the FIB loop takes the batch, N1 is erased
+ * and unregistered.
+ */
+TEST_F(
+    RibNexthopTrackingFixture,
+    WithdrawnNexthopStaysInMapUntilPendingBatchIsTaken) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const auto prefix = folly::IPAddress::createNetwork("1::/64");
+  const PrefixPathId prefixPathId{prefix, kDefaultPathID};
+  bool requestNamesN1{false};
+  std::optional<std::string> programmedN1IfName;
+  EXPECT_CALL(*fib_, updateUnicastRoute_(Eq(prefix), _, _, _, _, _))
+      .WillOnce([&](const folly::CIDRNetwork&,
+                    std::shared_ptr<const BgpPath>,
+                    std::shared_ptr<const WeightedNexthopMap> weightedNexthops,
+                    const bool,
+                    const bool,
+                    const MockFib::NexthopInfoMap& nexthopInfoMap) {
+        requestNamesN1 =
+            weightedNexthops && weightedNexthops->contains(kPeerAddr1);
+        const auto it = nexthopInfoMap.find(kPeerAddr1);
+        if (it != nexthopInfoMap.end()) {
+          programmedN1IfName = it->second.getIfName();
+        }
+      })
+      .WillRepeatedly(::testing::Return());
+
+  auto fibFuture = fib_->getFibProgramFuture();
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(
+             kPeerAddr1,
+             /*isReachable=*/true,
+             /*igpCost=*/1,
+             /*isConnected=*/true,
+             /*excludeNexthopWithoutCost=*/true,
+             /*ifName=*/"eth1/1/1"),
+         NexthopStatus(kPeerAddr2, /*isReachable=*/true, /*igpCost=*/10)});
+    // The eBGP path via N1 is the best path. The iBGP path via N2 keeps the
+    // RibEntry after the withdrawal.
+    rib_->processSingleRibInUpdate(
+        eBgpPeer1_, pathVia(kPeerAddr1), prefixPathId);
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr2), prefixPathId);
+    rib_->processRibInInitialPathComputation(std::chrono::milliseconds(0));
+    rib_->processSingleRibInUpdate(eBgpPeer1_, nullptr, prefixPathId);
+  });
+  fibFuture.wait();
+
+  EXPECT_TRUE(requestNamesN1);
+  EXPECT_EQ(std::optional<std::string>("eth1/1/1"), programmedN1IfName);
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    EXPECT_EQ(
+        rib_->nexthopInfoMap_.end(), rib_->nexthopInfoMap_.find(kPeerAddr1));
+    EXPECT_FALSE(nexthopCache->isRegistered(kPeerAddr1));
+  });
+}
+
+/*
+ * Nexthop N1 loses its last route while a FIB batch is pending. A route for
+ * another prefix then links to N1 before the FIB loop runs. After the FIB loop
+ * takes the batch, N1 must stay in nexthopInfoMap_ and stay registered.
+ */
+TEST_F(
+    RibNexthopTrackingFixture,
+    RelinkedNexthopIsKeptAfterPendingBatchIsTaken) {
+  auto* nexthopCache = rib_->nexthopCache_.get();
+  const PrefixPathId prefixPathId{
+      folly::IPAddress::createNetwork("1::/64"), kDefaultPathID};
+  const PrefixPathId otherPrefixPathId{
+      folly::IPAddress::createNetwork("2::/64"), kDefaultPathID};
+
+  auto fibFuture = fib_->getFibProgramFuture();
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    nexthopCache->addOrUpdateNextHopStatus(
+        {NexthopStatus(kPeerAddr1, /*isReachable=*/true, /*igpCost=*/1),
+         NexthopStatus(kPeerAddr2, /*isReachable=*/true, /*igpCost=*/10)});
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), prefixPathId);
+    rib_->processRibInInitialPathComputation(std::chrono::milliseconds(0));
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr2), prefixPathId);
+    ASSERT_TRUE(rib_->nexthopInfoMap_.contains(kPeerAddr1));
+    ASSERT_TRUE(rib_->nexthopInfoMap_.at(kPeerAddr1).isRouteInfoListEmpty());
+    rib_->processSingleRibInUpdate(
+        iBgpPeer_, pathVia(kPeerAddr1), otherPrefixPathId);
+  });
+  fibFuture.wait();
+
+  rib_->evb_.runInEventBaseThreadAndWait([&]() {
+    const auto it = rib_->nexthopInfoMap_.find(kPeerAddr1);
+    ASSERT_NE(rib_->nexthopInfoMap_.end(), it);
+    EXPECT_FALSE(it->second.isRouteInfoListEmpty());
+    EXPECT_TRUE(nexthopCache->isRegistered(kPeerAddr1));
   });
 }
 

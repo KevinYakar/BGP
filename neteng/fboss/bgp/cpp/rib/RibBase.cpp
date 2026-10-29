@@ -508,6 +508,7 @@ folly::coro::Task<void> RibBase::processFibProgrammingMsgLoop() noexcept {
     } // ScopedProfile for fibProgramming_batch
 
     fibBatchList_.clear();
+    deleteUnusedNexthopInfos();
     if (fullSync || toFibTotal) {
       XLOGF(DBG2, "Added {} prefixes to Fib batch", toFibTotal);
       co_await fib_->program(fullSync);
@@ -3550,7 +3551,22 @@ bool RibBase::checkAndDeleteNexthopInfo(const folly::IPAddress& nexthop) {
     return false;
   }
   /*
-   * At this point, no RouteInfo objects are associated with this nexthop
+   * A RibEntry in fibBatchList_ can still name this nexthop, and the FIB reads
+   * its NexthopInfo when the FIB loop builds the request. The NexthopInfo stays
+   * registered and in nexthopInfoMap_, with no RouteInfo. The FIB loop deletes
+   * it after it takes the batch.
+   */
+  if (!fibBatchList_.empty()) {
+    return false;
+  }
+  deleteNexthopInfo(it);
+  return true;
+}
+
+RibBase::NexthopInfoMap::iterator RibBase::deleteNexthopInfo(
+    NexthopInfoMap::iterator it) {
+  const auto& nexthop = it->first;
+  /*
    * Unregister and try to remove from nexthopCache.
    *
    * NOTE: nexthopCache only removes nexthopInfo if
@@ -3560,16 +3576,25 @@ bool RibBase::checkAndDeleteNexthopInfo(const folly::IPAddress& nexthop) {
       DBG2, "Deleting nexthop status for {} from nexthopCache", nexthop.str());
   nexthopCache_->unregisterAndRemoveNexthopStatus(nexthop);
 
-  if (!nexthopInfo.isResolvedForSelection()) {
+  if (!it->second.isResolvedForSelection()) {
     ribCounters_.decrementUnresolvableNexthopCount();
   }
 
   // Delete from nexthopInfoMap_
   XLOGF(
       DBG2, "Deleting NexthopInfo for {} from nexthopInfoMap_", nexthop.str());
-  nexthopInfoMap_.erase(it);
   RibStats::decrNexthopInfoCount();
-  return true;
+  return nexthopInfoMap_.erase(it);
+}
+
+void RibBase::deleteUnusedNexthopInfos() {
+  for (auto it = nexthopInfoMap_.begin(); it != nexthopInfoMap_.end();) {
+    if (it->second.isRouteInfoListEmpty()) {
+      it = deleteNexthopInfo(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 namespace {
