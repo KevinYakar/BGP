@@ -294,12 +294,19 @@ install(TARGETS
 #
 # Common external dependencies
 #
+# Not ${Boost_LIBRARIES}: folly's package config runs find_package(Boost) again
+# with its own components, which resets it.
+set(BGP_BOOST_LIBS)
+foreach(component IN LISTS REQ_BOOST_COMPONENTS)
+  list(APPEND BGP_BOOST_LIBS Boost::${component})
+endforeach()
+
 set(BGP_BASE_LIBS
   Folly::folly
   glog::glog
   gflags
   Threads::Threads
-  ${Boost_LIBRARIES}
+  ${BGP_BOOST_LIBS}
   magic_enum::magic_enum
 )
 # Variant-specific archive closures are intentionally excluded. They may
